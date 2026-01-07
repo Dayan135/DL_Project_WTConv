@@ -1,107 +1,213 @@
-import sys
+# benchmark_three_impls.py
+#
+# Benchmarks (CUDA):
+#   1) Reference PyTorch layer: WTConv2d (from Reference repo)
+#   2) cpp_module extension      (your custom C++/CUDA extension)
+#   3) cuda_module extension     (another C++/CUDA extension, if available)
+#
+# Usage:
+#   python benchmark_three_impls.py
+#
+# Notes:
+# - This file assumes cpp_module exposes: wtconv_forward(x, weights_list, stride, pad, groups, dwt_scale, idwt_scale)
+# - It assumes cuda_module exposes the same API. If it differs, edit the adapter in _make_cuda_module_fn().
+
 import os
-import time
+import sys
 import torch
-import numpy as np
 
-# 1. Setup Paths
-repo_path = os.path.join(os.path.dirname(__file__), 'Reference')
-if not os.path.exists(repo_path):
-    print(f"[ERROR] Reference path not found: {repo_path}")
-    sys.exit(1)
-sys.path.insert(0, repo_path) # Priority to Reference
-sys.path.append(os.path.join(os.path.dirname(__file__), 'cpp_source'))
+# -----------------------------
+# 0) Paths
+# -----------------------------
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-# 2. Imports
-try:
-    import cpp_module
-except ImportError:
-    print("[ERROR] Could not import cpp_module. Compile it first.")
+ref_repo_path = os.path.join(HERE, "Reference")
+cpp_source_path = os.path.join(HERE, "cpp_source")
+
+if not os.path.exists(ref_repo_path):
+    print(f"[ERROR] Reference path not found: {ref_repo_path}")
     sys.exit(1)
 
+sys.path.insert(0, ref_repo_path)      # Priority to Reference
+sys.path.append(cpp_source_path)       # Where extensions often live/build
+
+
+# -----------------------------
+# 1) Imports
+# -----------------------------
+# Reference implementation (PyTorch)
 try:
     from wtconv.wtconv2d import WTConv2d
-    print("[INFO] Imported WTConv2d from Reference.")
 except ImportError as e:
-    print(f"[ERROR] Could not import WTConv2d: {e}")
+    print(f"[ERROR] Could not import WTConv2d from Reference: {e}")
     sys.exit(1)
 
-def run_benchmark():
-    print("\n=== Performance Benchmark: BGU Repo vs C++ Kernel ===")
-    
-    # --- Configuration ---
-    # Using specific sizes to test load
+# cpp_module (required)
+try:
+    import cpp_module
+except ImportError as e:
+    print(f"[ERROR] Could not import cpp_module: {e}")
+    print("Compile it first (setup.py / pip install -e .).")
+    sys.exit(1)
+
+# cuda_module (optional)
+cuda_module = None
+try:
+    import cuda_module as _cuda_module
+    cuda_module = _cuda_module
+except ImportError:
+    cuda_module = None
+
+
+# -----------------------------
+# 2) CUDA timing util
+# -----------------------------
+def _time_cuda(fn, iters: int, warmup: int = 20) -> float:
+    """
+    Returns: avg milliseconds per iteration for fn() on CUDA.
+    """
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    start.record()
+    for _ in range(iters):
+        fn()
+    end.record()
+
+    torch.cuda.synchronize()
+    total_ms = start.elapsed_time(end)
+    return total_ms / iters
+
+
+# -----------------------------
+# 3) Adapters
+# -----------------------------
+def _make_wtconv2d_fn(layer: WTConv2d, x: torch.Tensor):
+    def fn():
+        return layer(x)
+    return fn
+
+
+def _make_cpp_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
+                        dwt_scale: float, idwt_scale: float):
+    # Expected signature:
+    # cpp_module.wtconv_forward(x, [w0,w1,...], stride, pad, groups, dwt_scale, idwt_scale)
+    def fn():
+        return cpp_module.wtconv_forward(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
+    return fn
+
+
+def _make_cuda_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
+                         dwt_scale: float, idwt_scale: float):
+    """
+    If your cuda_module has a different function name/signature,
+    change it here. This is the only place you should touch.
+    """
+    # Default assumption: same as cpp_module
+    def fn():
+        return cuda_module.wtconv_forward(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
+    return fn
+
+
+# -----------------------------
+# 4) Main benchmark
+# -----------------------------
+def run():
+    print("\n=== Benchmark: WTConv2d vs cpp_module vs cuda_module (CUDA) ===")
+
+    if not torch.cuda.is_available():
+        print("[ERROR] CUDA is not available. Run on a GPU node.")
+        return
+
+    device = torch.device("cuda")
+    torch.backends.cudnn.benchmark = True
+
+    # --- Config (edit freely) ---
     BATCH = 16
     CHANNELS = 64
     HEIGHT = 64
     WIDTH = 64
     KERNEL_SIZE = 5
-    ITERATIONS = 50
-    
-    # Instantiate Reference
-    # Note: BGU uses depthwise logic (groups=4*C internally)
-    ref_layer = WTConv2d(CHANNELS, CHANNELS, kernel_size=KERNEL_SIZE, wt_levels=1, wt_type='db1')
-    ref_layer.eval()
-    
-    # Inputs
-    x_torch = torch.randn(BATCH, CHANNELS, HEIGHT, WIDTH)
-    
-    # Extract Weights and Setup C++ Args
-    # We must grab the internal conv weight
-    weight_torch = ref_layer.wavelet_convs[0].weight.detach()
-    
-    out_c, in_c, k, _ = weight_torch.shape
-    # Groups detection logic
-    if in_c == 1:
-        groups = out_c 
-    else:
-        groups = 1
+    WT_LEVELS = 1
+    ITERATIONS = 200
 
-    x_np = x_torch.numpy()
-    w_np = weight_torch.numpy()
     stride = 1
     pad = KERNEL_SIZE // 2
-    
-    print(f"Config: Batch={BATCH}, C={CHANNELS}, H={HEIGHT}, W={WIDTH}, Groups={groups}")
-    print(f"Running {ITERATIONS} iterations...")
 
-    # --- 1. PyTorch Benchmark ---
-    # We run the FULL layer (including scale/residual) because that is "The Repo Implementation"
-    # To be strictly fair to kernel vs kernel, we could disable scales, but PyTorch overhead is low.
-    
-    # Warmup
-    for _ in range(5):
-        _ = ref_layer(x_torch)
-        
-    start_time = time.time()
-    for _ in range(ITERATIONS):
-        _ = ref_layer(x_torch)
-    torch_time = time.time() - start_time
-    
-    # --- 2. C++ Benchmark ---
-    # Warmup
-    for _ in range(5):
-        _ = cpp_module.wtconv_forward(x_np, w_np, stride, pad, groups, 0.5, 0.5)
+    dwt_scale = 0.5
+    idwt_scale = 0.5
 
-    start_time = time.time()
-    for _ in range(ITERATIONS):
-        # Note: We pass 0.5, 0.5 scales to match correctness
-        _ = cpp_module.wtconv_forward(x_np, w_np, stride, pad, groups, 0.5, 0.5)
-    cpp_time = time.time() - start_time
+    print(f"Device: {torch.cuda.get_device_name(0)}")
+    print(f"Shape:  N={BATCH}, C={CHANNELS}, H={HEIGHT}, W={WIDTH}")
+    print(f"K:      {KERNEL_SIZE}, wt_levels={WT_LEVELS}, iters={ITERATIONS}")
+    print(f"Scales: dwt={dwt_scale}, idwt={idwt_scale}")
 
-    # --- Results ---
-    avg_torch = (torch_time / ITERATIONS) * 1000
-    avg_cpp = (cpp_time / ITERATIONS) * 1000
-    
-    print("\n--- Results (Forward Pass) ---")
-    print(f"PyTorch (Repo):  {avg_torch:.4f} ms/iter")
-    print(f"C++ Kernel:      {avg_cpp:.4f} ms/iter")
-    
-    if avg_cpp < avg_torch:
-        print(f"\n>> C++ is {avg_torch/avg_cpp:.2f}x FASTER 🚀")
+    # Input
+    x = torch.randn(BATCH, CHANNELS, HEIGHT, WIDTH, device=device, dtype=torch.float32)
+
+    # Reference layer (WTConv2d)
+    ref = WTConv2d(
+        CHANNELS, CHANNELS,
+        kernel_size=KERNEL_SIZE,
+        wt_levels=WT_LEVELS,
+        wt_type="db1",
+    ).to(device).eval()
+
+    # Pull weights for extensions:
+    # In the Reference repo, wavelet_convs is a list per level.
+    weights = []
+    for i in range(WT_LEVELS):
+        w = ref.wavelet_convs[i].weight.detach().contiguous().to(device)
+        weights.append(w)
+
+    # Infer groups (depthwise if in_c == 1)
+    # Using level-0 weight to decide; should match all levels.
+    out_c, in_c, _, _ = weights[0].shape
+    groups = out_c if in_c == 1 else 1
+    print(f"Groups inferred: {groups}")
+
+    # Build benchmark functions
+    wt_fn = _make_wtconv2d_fn(ref, x)
+    cpp_fn = _make_cpp_module_fn(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
+
+    cuda_fn = None
+    if cuda_module is not None:
+        cuda_fn = _make_cuda_module_fn(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
+        print(f"cuda_module loaded from: {cuda_module.__file__}")
     else:
-        print(f"\n>> C++ is {avg_cpp/avg_torch:.2f}x SLOWER 🐢")
-        print("(Note: PyTorch uses AVX2/MKL optimizations. Ensure your C++ is compiled with -O3 and OpenMP)")
+        print("cuda_module: NOT FOUND (will skip). If you expected it, compile/install it and ensure import works.")
+
+    # Run (no grad)
+    with torch.no_grad():
+        # WTConv2d (Reference)
+        wt_ms = _time_cuda(wt_fn, iters=ITERATIONS, warmup=30)
+
+        # cpp_module
+        cpp_ms = _time_cuda(cpp_fn, iters=ITERATIONS, warmup=30)
+
+        # cuda_module
+        cuda_ms = None
+        if cuda_fn is not None:
+            cuda_ms = _time_cuda(cuda_fn, iters=ITERATIONS, warmup=30)
+
+    # Print results
+    print("\n--- Results (Forward only, CUDA) ---")
+    print(f"WTConv2d (Reference): {wt_ms:.4f} ms/iter")
+    print(f"cpp_module:           {cpp_ms:.4f} ms/iter")
+
+    if cuda_ms is not None:
+        print(f"cuda_module:          {cuda_ms:.4f} ms/iter")
+
+    # Relative speeds vs WTConv2d
+    print("\n--- Speedup vs WTConv2d ---")
+    print(f"cpp_module:  {wt_ms / cpp_ms:.2f}x")
+    if cuda_ms is not None:
+        print(f"cuda_module: {wt_ms / cuda_ms:.2f}x")
+
 
 if __name__ == "__main__":
-    run_benchmark()
+    run()
