@@ -3,16 +3,16 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 import pybind11
 
 ext_modules = [
-    Pybind11Extension(
+    Extension(
         "cpp_module",
-        ["cpp_source/pybind_module.cpp", "cpp_source/cpp_kernel.cpp"],
+        ["pybind_module.cpp", "cpp_kernel.cpp"],
         include_dirs=[pybind11.get_include()],
-        extra_compile_args=["-std=c++11"],
-    )
+        language='c++'
+    ),
 ]
 
 setup(
     name="cpp_module",
+    version="0.1",
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext},
 )
