@@ -131,7 +131,7 @@ def verify_repo_equivalence():
         
         if hasattr(cuda_module, 'wtconv_forward'):
              # If you kept the composite wrapper
-             out_cuda_tensor = cuda_module.wtconv_forward(x_cuda, w_cuda, stride, pad, groups, 0.5, 0.5)
+             out_cuda_tensor = cuda_module.wtconv_forward(x_cuda, [w_cuda], stride, pad, groups, 0.5, 0.5)
         else:
              # If using atomic pipeline logic manually (Fallback test):
              # 1. DWT

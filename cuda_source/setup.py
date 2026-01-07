@@ -6,7 +6,7 @@ setup(
     ext_modules=[
         CUDAExtension('cuda_module', [
             'pybind_module.cpp',
-            'cuda_kernels.cu',
+            'cuda_kernel.cu',
         ]),
     ],
     cmdclass={

@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include "cuda_kernels.h"
+#include "cuda_kernel.h"
 
 #define CUDA_CHECK(call) \
     do { \
@@ -201,11 +201,62 @@ __global__ void conv2d_dw_fwd_kernel(const float* __restrict__ input, const floa
     output[(n*C+c)*(H_out*W_out) + hw] = sum;
 }
 
-// [Include Backward Input and Weight kernels here - Identical to previous turn]
-// For brevity, I assume conv2d_depthwise_backward_input_kernel and 
-// conv2d_depthwise_backward_weight_kernel are defined here exactly as before.
+// Backward Input Kernel
+__global__ void conv2d_dw_bwd_in_kernel(const float* __restrict__ grad_out, const float* __restrict__ weight, float* __restrict__ grad_in,
+                                        int N, int C, int H_in, int W_in, int K, int Stride, int Pad, int H_out, int W_out) {
+    int n = blockIdx.z;
+    int c = blockIdx.y;
+    int hw = blockIdx.x * blockDim.x + threadIdx.x;
+    int h_in = hw / W_in;
+    int w_in = hw % W_in;
+    if (h_in >= H_in || w_in >= W_in || n >= N || c >= C) return;
 
-// ... (Paste Backward Conv Kernels Here) ...
+    const float* go_ptr = grad_out + (n*C+c)*(H_out*W_out);
+    const float* w_ptr = weight + c*(K*K);
+    
+    float sum = 0.0f;
+    for(int kh=0; kh<K; ++kh) {
+        for(int kw=0; kw<K; ++kw) {
+            int h_out = (h_in + Pad - kh);
+            int w_out = (w_in + Pad - kw);
+            if(h_out % Stride == 0 && w_out % Stride == 0) {
+                h_out /= Stride;
+                w_out /= Stride;
+                if(h_out >= 0 && h_out < H_out && w_out >= 0 && w_out < W_out) {
+                    sum += go_ptr[h_out*W_out + w_out] * w_ptr[kh*K+kw];
+                }
+            }
+        }
+    }
+    grad_in[(n*C+c)*(H_in*W_in) + hw] = sum;
+}
+
+// Backward Weight Kernel
+__global__ void conv2d_dw_bwd_w_kernel(const float* __restrict__ grad_out, const float* __restrict__ input, float* __restrict__ grad_weight,
+                                       int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
+    int c = blockIdx.y;
+    int kk = blockIdx.x * blockDim.x + threadIdx.x;
+    int kh = kk / K;
+    int kw = kk % K;
+    if (kh >= K || kw >= K || c >= C) return;
+
+    float sum = 0.0f;
+    for(int n=0; n<N; ++n) {
+        const float* go_ptr = grad_out + (n*C+c)*(H_out*W_out);
+        const float* in_ptr = input + (n*C+c)*(H_in*W_in);
+        
+        for(int h_out=0; h_out<H_out; ++h_out) {
+            for(int w_out=0; w_out<W_out; ++w_out) {
+                int h_in = h_out*Stride - Pad + kh;
+                int w_in = w_out*Stride - Pad + kw;
+                if(h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                    sum += go_ptr[h_out*W_out + w_out] * in_ptr[h_in*W_in + w_in];
+                }
+            }
+        }
+    }
+    atomicAdd(&grad_weight[c*(K*K) + kh*K+kw], sum);
+}
 
 // ------------------------------------------------------------------
 // Host Launchers
@@ -246,5 +297,18 @@ void launch_conv_depthwise_fwd(const float* input, const float* weight, float* o
     CUDA_CHECK(cudaGetLastError());
 }
 
-// Define launch_conv_depthwise_bwd_in and launch_conv_depthwise_bwd_w similarly...
-// (Assuming implementations exist in this file)
+void launch_conv_depthwise_bwd_in(const float* grad_out, const float* weight, float* grad_in,
+                                  int N, int C, int H_in, int W_in, int K, int Stride, int Pad, int H_out, int W_out) {
+    dim3 block(256);
+    dim3 grid((H_in*W_in + 255)/256, C, N);
+    conv2d_dw_bwd_in_kernel<<<grid, block>>>(grad_out, weight, grad_in, N, C, H_in, W_in, K, Stride, Pad, H_out, W_out);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight,
+                                 int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
+    dim3 block(256);
+    dim3 grid((K*K + 255)/256, C, 1);
+    conv2d_dw_bwd_w_kernel<<<grid, block>>>(grad_out, input, grad_weight, N, C, H_out, W_out, K, Stride, Pad, H_in, W_in);
+    CUDA_CHECK(cudaGetLastError());
+}

@@ -14,7 +14,9 @@
 
 import os
 import sys
+import time
 import torch
+import numpy as np
 
 # -----------------------------
 # 0) Paths
@@ -23,13 +25,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 ref_repo_path = os.path.join(HERE, "Reference")
 cpp_source_path = os.path.join(HERE, "cpp_source")
+cuda_source_path = os.path.join(HERE, "cuda_source")
 
 if not os.path.exists(ref_repo_path):
     print(f"[ERROR] Reference path not found: {ref_repo_path}")
     sys.exit(1)
 
 sys.path.insert(0, ref_repo_path)      # Priority to Reference
-sys.path.append(cpp_source_path)       # Where extensions often live/build
+sys.path.append(cpp_source_path)       # Where cpp extension lives/builds
+sys.path.append(cuda_source_path)      # Where cuda extension lives/builds
 
 
 # -----------------------------
@@ -60,7 +64,7 @@ except ImportError:
 
 
 # -----------------------------
-# 2) CUDA timing util
+# 2) Timing utils
 # -----------------------------
 def _time_cuda(fn, iters: int, warmup: int = 20) -> float:
     """
@@ -83,6 +87,19 @@ def _time_cuda(fn, iters: int, warmup: int = 20) -> float:
     return total_ms / iters
 
 
+def _time_cpu(fn, iters: int, warmup: int = 5) -> float:
+    """
+    Returns: avg milliseconds per iteration for fn() on CPU.
+    """
+    for _ in range(warmup):
+        fn()
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        fn()
+    t1 = time.perf_counter()
+    return (t1 - t0) * 1000.0 / iters  # ms/iter
+
+
 # -----------------------------
 # 3) Adapters
 # -----------------------------
@@ -94,20 +111,24 @@ def _make_wtconv2d_fn(layer: WTConv2d, x: torch.Tensor):
 
 def _make_cpp_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
                         dwt_scale: float, idwt_scale: float):
-    # Expected signature:
-    # cpp_module.wtconv_forward(x, [w0,w1,...], stride, pad, groups, dwt_scale, idwt_scale)
+    """
+    cpp_module is a CPU numpy extension.
+    Convert tensors to numpy once (outside the timing loop).
+    """
+    x_np = x.detach().cpu().numpy().astype(np.float32, copy=False)
+    w_np = weights[0].detach().cpu().numpy().astype(np.float32, copy=False)
+    
     def fn():
-        return cpp_module.wtconv_forward(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
+        return cpp_module.wtconv_forward(x_np, w_np, stride, pad, groups, dwt_scale, idwt_scale)
     return fn
 
 
 def _make_cuda_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
                          dwt_scale: float, idwt_scale: float):
     """
-    If your cuda_module has a different function name/signature,
-    change it here. This is the only place you should touch.
+    cuda_module is a CUDA torch extension.
+    Pass torch tensors directly (weights is already a list, don't nest it).
     """
-    # Default assumption: same as cpp_module
     def fn():
         return cuda_module.wtconv_forward(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
     return fn
@@ -183,30 +204,30 @@ def run():
 
     # Run (no grad)
     with torch.no_grad():
-        # WTConv2d (Reference)
+        # WTConv2d (Reference) - CUDA
         wt_ms = _time_cuda(wt_fn, iters=ITERATIONS, warmup=30)
 
-        # cpp_module
-        cpp_ms = _time_cuda(cpp_fn, iters=ITERATIONS, warmup=30)
+        # cpp_module - CPU (cannot use CUDA events for CPU code)
+        cpp_ms = _time_cpu(cpp_fn, iters=ITERATIONS, warmup=10)
 
-        # cuda_module
+        # cuda_module - CUDA
         cuda_ms = None
         if cuda_fn is not None:
             cuda_ms = _time_cuda(cuda_fn, iters=ITERATIONS, warmup=30)
 
     # Print results
-    print("\n--- Results (Forward only, CUDA) ---")
-    print(f"WTConv2d (Reference): {wt_ms:.4f} ms/iter")
-    print(f"cpp_module:           {cpp_ms:.4f} ms/iter")
+    print("\n--- Results (Forward only) ---")
+    print(f"WTConv2d (Reference): {wt_ms:.4f} ms/iter (CUDA)")
+    print(f"cpp_module:           {cpp_ms:.4f} ms/iter (CPU)")
 
     if cuda_ms is not None:
-        print(f"cuda_module:          {cuda_ms:.4f} ms/iter")
+        print(f"cuda_module:          {cuda_ms:.4f} ms/iter (CUDA)")
 
     # Relative speeds vs WTConv2d
-    print("\n--- Speedup vs WTConv2d ---")
-    print(f"cpp_module:  {wt_ms / cpp_ms:.2f}x")
+    print("\n--- Speedup vs WTConv2d (CUDA baseline) ---")
+    print(f"cpp_module (CPU):  {wt_ms / cpp_ms:.5f}x (note: CPU vs CUDA, not a fair comparison)")
     if cuda_ms is not None:
-        print(f"cuda_module: {wt_ms / cuda_ms:.2f}x")
+        print(f"cuda_module (CUDA): {wt_ms / cuda_ms:.2f}x")
 
 
 if __name__ == "__main__":
