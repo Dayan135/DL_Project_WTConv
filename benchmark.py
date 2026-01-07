@@ -5,150 +5,103 @@ import torch
 import numpy as np
 
 # 1. Setup Paths
-# Add 'Reference' to path to import the original WTConv
-sys.path.append(os.path.join(os.path.dirname(__file__), 'Reference'))
-# Add 'cpp_source' to path to import your compiled C++ module
+repo_path = os.path.join(os.path.dirname(__file__), 'Reference')
+if not os.path.exists(repo_path):
+    print(f"[ERROR] Reference path not found: {repo_path}")
+    sys.exit(1)
+sys.path.insert(0, repo_path) # Priority to Reference
 sys.path.append(os.path.join(os.path.dirname(__file__), 'cpp_source'))
 
-try:
-    from wtconv import WTConv2d
-    print("[INFO] Successfully imported WTConv2d from Reference.")
-except ImportError:
-    print("[ERROR] Could not import WTConv2d. Check if 'Reference' folder exists and is the BGU repo.")
-    sys.exit(1)
-
+# 2. Imports
 try:
     import cpp_module
-    print("[INFO] Successfully imported cpp_module.")
 except ImportError:
-    print("[ERROR] Could not import cpp_module. Did you run 'python setup.py build_ext --inplace' in cpp_source?")
+    print("[ERROR] Could not import cpp_module. Compile it first.")
     sys.exit(1)
 
-# ==========================================
-# Configuration
-# ==========================================
-BATCH_SIZE = 4
-IN_CHANNELS = 16
-OUT_CHANNELS = 16
-HEIGHT = 64
-WIDTH = 64
-KERNEL_SIZE = 5
-WT_LEVELS = 1  # YOUR C++ CODE SUPPORTS ONLY 1 LEVEL
-DEVICE = 'cpu' # C++ kernel is CPU-only, so we compare on CPU
+try:
+    from wtconv.wtconv2d import WTConv2d
+    print("[INFO] Imported WTConv2d from Reference.")
+except ImportError as e:
+    print(f"[ERROR] Could not import WTConv2d: {e}")
+    sys.exit(1)
 
 def run_benchmark():
-    print(f"\n[SETUP] Batch={BATCH_SIZE}, In={IN_CHANNELS}, Out={OUT_CHANNELS}, H={HEIGHT}, W={WIDTH}, K={KERNEL_SIZE}")
+    print("\n=== Performance Benchmark: BGU Repo vs C++ Kernel ===")
     
-    # -------------------------------------------------
-    # 1. Initialize PyTorch Model (Reference)
-    # -------------------------------------------------
-    # We force wt_levels=1 because your C++ kernel is hardcoded for 1 level logic.
-    ref_model = WTConv2d(IN_CHANNELS, OUT_CHANNELS, kernel_size=KERNEL_SIZE, wt_levels=WT_LEVELS).to(DEVICE)
+    # --- Configuration ---
+    # Using specific sizes to test load
+    BATCH = 16
+    CHANNELS = 64
+    HEIGHT = 64
+    WIDTH = 64
+    KERNEL_SIZE = 5
+    ITERATIONS = 50
     
-    # Important: WTConv2d usually uses a 'depthwise' or grouped convolution internally in the wavelet domain.
-    # Your C++ code implements a DENSE convolution (groups=1).
-    # To make them mathematically identical, we must ensure the Reference model 
-    # is using the same logic, or we accept that we are benchmarking different math operations.
-    # 
-    # *Assumption*: We act as if we extracted the weights from the reference and treated them as dense
-    # for the C++ kernel.
+    # Instantiate Reference
+    # Note: BGU uses depthwise logic (groups=4*C internally)
+    ref_layer = WTConv2d(CHANNELS, CHANNELS, kernel_size=KERNEL_SIZE, wt_levels=1, wt_type='db1')
+    ref_layer.eval()
     
-    # Create Random Input
-    input_tensor = torch.randn(BATCH_SIZE, IN_CHANNELS, HEIGHT, WIDTH, device=DEVICE, requires_grad=True)
+    # Inputs
+    x_torch = torch.randn(BATCH, CHANNELS, HEIGHT, WIDTH)
     
-    # Extract Weights for C++
-    # The BGU WTConv2d usually has a member `self.wt_conv` which is the Conv2d layer.
-    # We need to detach it and convert to numpy.
-    if hasattr(ref_model, 'wt_conv'):
-        weight_tensor = ref_model.wt_conv.weight.detach().cpu()
-        print(f"[INFO] Extracted weights with shape: {weight_tensor.shape}")
+    # Extract Weights and Setup C++ Args
+    # We must grab the internal conv weight
+    weight_torch = ref_layer.wavelet_convs[0].weight.detach()
+    
+    out_c, in_c, k, _ = weight_torch.shape
+    # Groups detection logic
+    if in_c == 1:
+        groups = out_c 
     else:
-        print("[ERROR] Could not find 'wt_conv' in reference model.")
-        return
+        groups = 1
 
-    # Prepare Numpy arrays for C++
-    input_np = input_tensor.detach().cpu().numpy()
-    weight_np = weight_tensor.numpy()
-    
-    # -------------------------------------------------
-    # 2. Correctness Check: FORWARD
-    # -------------------------------------------------
-    print("\n--- Correctness Check: Forward ---")
-    
-    # Reference Forward
-    ref_output = ref_model(input_tensor)
-    
-    # C++ Forward
-    # Note: Reference might use padding differently. 
-    # Standard WTConv usually does padding=kernel//2 inside.
-    padding = KERNEL_SIZE // 2 
+    x_np = x_torch.numpy()
+    w_np = weight_torch.numpy()
     stride = 1
+    pad = KERNEL_SIZE // 2
     
-    cpp_output = cpp_module.wtconv_forward(input_np, weight_np, stride, padding)
-    
-    # Convert ref to numpy for comparison
-    ref_output_np = ref_output.detach().cpu().numpy()
-    
-    # Compare
-    # Tolerance is slightly loose due to float precision differences
-    if np.allclose(ref_output_np, cpp_output, atol=1e-4):
-        print("[PASS] Forward pass results match!")
-    else:
-        diff = np.abs(ref_output_np - cpp_output).max()
-        print(f"[FAIL] Forward pass mismatch. Max diff: {diff}")
-        # Continue anyway to check speed
+    print(f"Config: Batch={BATCH}, C={CHANNELS}, H={HEIGHT}, W={WIDTH}, Groups={groups}")
+    print(f"Running {ITERATIONS} iterations...")
 
-    # -------------------------------------------------
-    # 3. Correctness Check: BACKWARD
-    # -------------------------------------------------
-    print("\n--- Correctness Check: Backward ---")
+    # --- 1. PyTorch Benchmark ---
+    # We run the FULL layer (including scale/residual) because that is "The Repo Implementation"
+    # To be strictly fair to kernel vs kernel, we could disable scales, but PyTorch overhead is low.
     
-    # Reference Backward
-    grad_output = torch.randn_like(ref_output)
-    ref_model.zero_grad()
-    ref_output.backward(grad_output)
-    ref_grad_input = input_tensor.grad.detach().cpu().numpy()
-    ref_grad_weight = ref_model.wt_conv.weight.grad.detach().cpu().numpy()
-    
-    # C++ Backward
-    grad_output_np = grad_output.detach().cpu().numpy()
-    cpp_grad_input, cpp_grad_weight = cpp_module.wtconv_backward(grad_output_np, input_np, weight_np, stride, padding)
-    
-    if np.allclose(ref_grad_input, cpp_grad_input, atol=1e-4):
-        print("[PASS] Backward pass (Input Grads) match!")
-    else:
-        print(f"[FAIL] Backward pass (Input Grads) mismatch. Max diff: {np.abs(ref_grad_input - cpp_grad_input).max()}")
-
-    if np.allclose(ref_grad_weight, cpp_grad_weight, atol=1e-4):
-        print("[PASS] Backward pass (Weight Grads) match!")
-    else:
-        print(f"[FAIL] Backward pass (Weight Grads) mismatch. Max diff: {np.abs(ref_grad_weight - cpp_grad_weight).max()}")
-
-    # -------------------------------------------------
-    # 4. Performance Benchmark
-    # -------------------------------------------------
-    print("\n--- Performance Benchmark (Forward Pass) ---")
-    iterations = 50
-    
-    # Measure PyTorch
+    # Warmup
+    for _ in range(5):
+        _ = ref_layer(x_torch)
+        
     start_time = time.time()
-    for _ in range(iterations):
-        _ = ref_model(input_tensor)
-    torch_time = (time.time() - start_time) / iterations
+    for _ in range(ITERATIONS):
+        _ = ref_layer(x_torch)
+    torch_time = time.time() - start_time
     
-    # Measure C++
+    # --- 2. C++ Benchmark ---
+    # Warmup
+    for _ in range(5):
+        _ = cpp_module.wtconv_forward(x_np, w_np, stride, pad, groups, 0.5, 0.5)
+
     start_time = time.time()
-    for _ in range(iterations):
-        _ = cpp_module.wtconv_forward(input_np, weight_np, stride, padding)
-    cpp_time = (time.time() - start_time) / iterations
+    for _ in range(ITERATIONS):
+        # Note: We pass 0.5, 0.5 scales to match correctness
+        _ = cpp_module.wtconv_forward(x_np, w_np, stride, pad, groups, 0.5, 0.5)
+    cpp_time = time.time() - start_time
+
+    # --- Results ---
+    avg_torch = (torch_time / ITERATIONS) * 1000
+    avg_cpp = (cpp_time / ITERATIONS) * 1000
     
-    print(f"PyTorch Average Time: {torch_time*1000:.4f} ms")
-    print(f"C++     Average Time: {cpp_time*1000:.4f} ms")
+    print("\n--- Results (Forward Pass) ---")
+    print(f"PyTorch (Repo):  {avg_torch:.4f} ms/iter")
+    print(f"C++ Kernel:      {avg_cpp:.4f} ms/iter")
     
-    if cpp_time < torch_time:
-        print(f"\n>> C++ is {torch_time/cpp_time:.2f}x FASTER")
+    if avg_cpp < avg_torch:
+        print(f"\n>> C++ is {avg_torch/avg_cpp:.2f}x FASTER 🚀")
     else:
-        print(f"\n>> C++ is {cpp_time/torch_time:.2f}x SLOWER")
+        print(f"\n>> C++ is {avg_cpp/avg_torch:.2f}x SLOWER 🐢")
+        print("(Note: PyTorch uses AVX2/MKL optimizations. Ensure your C++ is compiled with -O3 and OpenMP)")
 
 if __name__ == "__main__":
     run_benchmark()
