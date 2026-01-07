@@ -1,0 +1,7 @@
+torch>=2.0.0
+numpy
+pybind11
+setuptools
+# Dependencies for the BGU Reference Repo
+PyWavelets
+timm
