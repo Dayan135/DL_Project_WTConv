@@ -80,7 +80,66 @@ def get_model(arch, impl_type, device):
 
     return model.to(device)
 
-# --- 4. Training Engine ---
+# # --- 4. Training Engine ---
+# def train_model(args, model, loader):
+#     criterion = nn.CrossEntropyLoss()
+#     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    
+#     inference_only = (args.impl == 'cpp')
+#     if inference_only:
+#         print("⚠️  WARNING: Running in INFERENCE ONLY mode (No Backprop).")
+
+#     start_event = torch.cuda.Event(enable_timing=True)
+#     end_event = torch.cuda.Event(enable_timing=True)
+    
+#     model.train()
+#     torch.cuda.reset_peak_memory_stats()
+    
+#     print(f"\n--- 🚀 Starting Training ({args.epochs} epochs) ---")
+    
+#     total_samples = 0
+#     total_compute_time = 0.0
+    
+#     for epoch in range(args.epochs):
+#         for i, (inputs, labels) in enumerate(loader):
+#             if args.dry_run and i >= 10: break
+
+#             inputs, labels = inputs.to(args.device), labels.to(args.device)
+            
+#             start_event.record()
+#             optimizer.zero_grad()
+#             outputs = model(inputs)
+#             loss = criterion(outputs, labels)
+            
+#             if not inference_only:
+#                 loss.backward()
+#                 optimizer.step()
+            
+#             end_event.record()
+#             torch.cuda.synchronize()
+            
+#             batch_ms = start_event.elapsed_time(end_event)
+#             total_compute_time += (batch_ms / 1000.0)
+#             total_samples += inputs.size(0)
+            
+#             if i % 20 == 0:
+#                 print(f"    Epoch [{epoch+1}/{args.epochs}] Step [{i}] Loss: {loss.item():.4f} | Batch Time: {batch_ms:.2f}ms")
+
+#     peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
+#     throughput = total_samples / total_compute_time if total_compute_time > 0 else 0
+    
+#     return {
+#         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+#         "implementation": args.impl,
+#         "model": args.model,
+#         "batch_size": args.batch_size,
+#         "epochs": args.epochs,
+#         "throughput_img_sec": round(throughput, 2),
+#         "peak_vram_mb": round(peak_mem, 2),
+#         "total_time_s": round(total_compute_time, 2),
+#         "device": args.device
+#         }
+
 def train_model(args, model, loader):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -89,8 +148,16 @@ def train_model(args, model, loader):
     if inference_only:
         print("⚠️  WARNING: Running in INFERENCE ONLY mode (No Backprop).")
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    # --- Setup Timing Events ---
+    # We need separate events for Forward and Backward to see where the bottleneck is
+    start_batch = torch.cuda.Event(enable_timing=True)
+    end_batch   = torch.cuda.Event(enable_timing=True)
+    
+    start_fwd   = torch.cuda.Event(enable_timing=True)
+    end_fwd     = torch.cuda.Event(enable_timing=True)
+    
+    start_bwd   = torch.cuda.Event(enable_timing=True)
+    end_bwd     = torch.cuda.Event(enable_timing=True)
     
     model.train()
     torch.cuda.reset_peak_memory_stats()
@@ -98,36 +165,73 @@ def train_model(args, model, loader):
     print(f"\n--- 🚀 Starting Training ({args.epochs} epochs) ---")
     
     total_samples = 0
-    total_compute_time = 0.0
+    total_batch_time = 0.0
+    total_fwd_time = 0.0
+    total_bwd_time = 0.0
+    
+    # Track loss to ensure the model isn't outputting garbage (NaNs/Zeros)
+    last_loss = 0.0 
     
     for epoch in range(args.epochs):
         for i, (inputs, labels) in enumerate(loader):
             if args.dry_run and i >= 10: break
 
             inputs, labels = inputs.to(args.device), labels.to(args.device)
-            
-            start_event.record()
             optimizer.zero_grad()
+            
+            # 1. Measure Total Batch Time
+            start_batch.record()
+
+            # 2. Measure Forward
+            start_fwd.record()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
+            end_fwd.record()
             
+            # 3. Measure Backward (if applicable)
             if not inference_only:
+                start_bwd.record()
                 loss.backward()
                 optimizer.step()
+                end_bwd.record()
             
-            end_event.record()
+            end_batch.record()
+            
+            # Wait for GPU to finish everything
             torch.cuda.synchronize()
             
-            batch_ms = start_event.elapsed_time(end_event)
-            total_compute_time += (batch_ms / 1000.0)
+            # Accumulate Times
+            batch_ms = start_batch.elapsed_time(end_batch)
+            fwd_ms   = start_fwd.elapsed_time(end_fwd)
+            
+            # Handle inference case where bwd time is 0
+            bwd_ms = 0.0
+            if not inference_only:
+                bwd_ms = start_bwd.elapsed_time(end_bwd)
+
+            total_batch_time += (batch_ms / 1000.0) # convert to seconds
+            total_fwd_time   += (fwd_ms / 1000.0)
+            total_bwd_time   += (bwd_ms / 1000.0)
+            
             total_samples += inputs.size(0)
+            last_loss = loss.item()
             
             if i % 20 == 0:
-                print(f"    Epoch [{epoch+1}/{args.epochs}] Step [{i}] Loss: {loss.item():.4f} | Batch Time: {batch_ms:.2f}ms")
+                print(f"    Epoch [{epoch+1}/{args.epochs}] Step [{i}] "
+                      f"Loss: {last_loss:.4f} | "
+                      f"Fwd: {fwd_ms:.1f}ms | Bwd: {bwd_ms:.1f}ms")
 
+    # --- Final Calculations ---
     peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
-    throughput = total_samples / total_compute_time if total_compute_time > 0 else 0
+    throughput = total_samples / total_batch_time if total_batch_time > 0 else 0
     
+    # Avoid division by zero if dry_run was too short
+    num_batches = (i + 1) + (epoch * len(loader))
+    if num_batches == 0: num_batches = 1
+    
+    avg_fwd_ms = (total_fwd_time * 1000) / num_batches
+    avg_bwd_ms = (total_bwd_time * 1000) / num_batches
+
     return {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "implementation": args.impl,
@@ -136,7 +240,10 @@ def train_model(args, model, loader):
         "epochs": args.epochs,
         "throughput_img_sec": round(throughput, 2),
         "peak_vram_mb": round(peak_mem, 2),
-        "total_time_s": round(total_compute_time, 2),
+        "total_time_s": round(total_batch_time, 2),
+        "avg_fwd_ms": round(avg_fwd_ms, 2),
+        "avg_bwd_ms": round(avg_bwd_ms, 2),
+        "final_loss": round(last_loss, 4),
         "device": args.device
     }
 
