@@ -20,14 +20,10 @@ setup(
         CUDAExtension('cuda_module', [
             'pybind_module.cpp',
             'cuda_kernel.cu',
-<<<<<<< HEAD
-        ]),
-=======
         ],
         extra_compile_args={'cxx': cxx_args,
                             'nvcc': nvcc_args}
         )
->>>>>>> main
     ],
     cmdclass={
         'build_ext': BuildExtension
