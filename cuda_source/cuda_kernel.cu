@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include "cuda_kernels.h"
+#include "cuda_kernel.h"
 
 #define CUDA_CHECK(call) \
     do { \

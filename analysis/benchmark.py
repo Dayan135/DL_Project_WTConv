@@ -2,202 +2,196 @@ import os
 import sys
 import torch
 import time
+import argparse
 
 # -----------------------------
-# 0) Paths
+# 0) Path Setup & Compilation
 # -----------------------------
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ANALYSIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Ensure we can find compile_utils in the same folder
-sys.path.append(HERE)
+sys.path.append(ANALYSIS_DIR)
+import compile_utils
 
-import compile_utils  # Import the new script
+# Check for --no-build flag *before* we do anything else
+if "--no-build" in sys.argv:
+    os.environ["SKIP_COMPILE"] = "1"
+    print("[INFO] Compilation disabled via --no-build")
+else:
+    print("--- Triggering Auto-Compilation ---")
+    compile_utils.compile_all()
 
-# --- TRIGGER COMPILATION BEFORE IMPORTS ---
-print("--- Triggering Auto-Compilation ---")
-compile_utils.compile_all()
-# ------------------------------------------
-
+# -----------------------------
+# 1) Paths & Imports
+# -----------------------------
 ref_repo_path = os.path.join(HERE, "Reference")
 cpp_source_path = os.path.join(HERE, "cpp_source")
 cuda_source_path = os.path.join(HERE, "cuda_source")
-
-if not os.path.exists(ref_repo_path):
-    print(f"[ERROR] Reference path not found: {ref_repo_path}")
-    sys.exit(1)
+opt_cuda_source_path = os.path.join(HERE, "optimized_cuda_source")
 
 sys.path.insert(0, ref_repo_path)
 sys.path.append(cpp_source_path)
 sys.path.append(cuda_source_path)
+sys.path.append(opt_cuda_source_path)
 
-# -----------------------------
-# 1) Imports
-# -----------------------------
+# --- Load Modules ---
+modules = {}
+try: import cpp_module; modules['cpp'] = cpp_module
+except: pass
+try: import cuda_module; modules['cuda'] = cuda_module
+except: pass
+try: import optimized_cuda_module; modules['opt_cuda'] = optimized_cuda_module
+except: pass
+
 try:
     from wtconv.wtconv2d import WTConv2d
-    print("[INFO] WTConv2d loaded successfully from Reference.")
 except ImportError as e:
-    print(f"[ERROR] Could not import WTConv2d from Reference: {e}")
+    print(f"[ERROR] Could not import WTConv2d: {e}")
     sys.exit(1)
-
-try:
-    import cpp_module
-    print("[INFO] cpp_module loaded successfully.")
-except ImportError as e:
-    print(f"[ERROR] Could not import cpp_module: {e}")
-    sys.exit(1)
-
-cuda_module = None
-try:
-    import cuda_module as _cuda_module
-    cuda_module = _cuda_module
-    print("[INFO] cuda_module loaded successfully.")
-except ImportError:
-    print("[ERROR] cuda_module could not be imported.")
-    cuda_module = None
-
 
 # -----------------------------
 # 2) Timing Utils
 # -----------------------------
-def _time_cuda(fn, iters: int, warmup: int = 20) -> float:
-    """ Returns: avg milliseconds per iteration for fn() on GPU. """
-    for _ in range(warmup):
-        fn()
+def time_cuda(fn, iters=100, warmup=10):
+    for _ in range(warmup): fn()
     torch.cuda.synchronize()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-
+    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(iters):
-        fn()
+    for _ in range(iters): fn()
     end.record()
-
     torch.cuda.synchronize()
     return start.elapsed_time(end) / iters
 
-def _time_cpu(fn, iters: int, warmup: int = 5) -> float:
-    """ Returns: avg milliseconds per iteration for fn() on CPU. """
-    for _ in range(warmup):
-        fn()
-    
+def time_cpu(fn, iters=20, warmup=2):
+    for _ in range(warmup): fn()
     start = time.time()
-    for _ in range(iters):
-        fn()
-    end = time.time()
-    
-    total_ms = (end - start) * 1000
-    return total_ms / iters
+    for _ in range(iters): fn()
+    return ((time.time() - start) * 1000) / iters
+
+def make_fn(mod, x, w, s, p, g, ds, ids, use_cuda=True):
+    if use_cuda:
+        return lambda: mod.wtconv_forward(x, w, s, p, g, ds, ids)
+    else:
+        # Move to CPU once
+        x_c = x.cpu().contiguous()
+        w_c = [ww.cpu().contiguous() for ww in w]
+        return lambda: mod.wtconv_forward(x_c, w_c, s, p, g, ds, ids)
 
 # -----------------------------
-# 3) Adapters
-# -----------------------------
-def _make_wtconv2d_fn(layer: WTConv2d, x: torch.Tensor):
-    def fn():
-        return layer(x)
-    return fn
-
-def _make_cpp_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
-                        dwt_scale: float, idwt_scale: float):
-    # Move inputs to CPU once before benchmarking
-    x_cpu = x.cpu().contiguous()
-    w_cpu = [w.cpu().contiguous() for w in weights]
-    
-    def fn():
-        return cpp_module.wtconv_forward(x_cpu, w_cpu, stride, pad, groups, dwt_scale, idwt_scale)
-    return fn
-
-def _make_cuda_module_fn(x: torch.Tensor, weights: list[torch.Tensor], stride: int, pad: int, groups: int,
-                          dwt_scale: float, idwt_scale: float):
-    def fn():
-        return cuda_module.wtconv_forward(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
-    return fn
-
-
-# -----------------------------
-# 4) Main Benchmark Function
+# 3) Main Benchmark
 # -----------------------------
 def run_benchmark(
-    batch=16,
-    channels=64,
-    height=64,
-    width=64,
-    kernel_size=5,
-    wt_levels=1,
-    iterations=100,
-    dwt_scale=0.5,
-    idwt_scale=0.5
+    batch=16, 
+    channels=64, 
+    height=64, 
+    width=64, 
+    kernel_size=5, 
+    wt_levels=2, 
+    iterations=100
 ):
-    print("\n=== Benchmark: WTConv2d vs cpp_module (CPU) vs cuda_module (GPU) ===")
-
+    print("\n=== Benchmark: Baseline vs Optimized ===")
     if not torch.cuda.is_available():
-        print("[ERROR] CUDA is not available. Run on a GPU node.")
+        print("[ERROR] CUDA not available.")
         return
 
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True
-
-    # Derived Config
+    
     stride = 1
     pad = kernel_size // 2
 
-    # --- Print Stats ---
-    print(f"Device:   {torch.cuda.get_device_name(0)}")
-    print(f"Input:    (N={batch}, C={channels}, H={height}, W={width})")
-    print(f"Kernel:   K={kernel_size}, Levels={wt_levels}")
-    print(f"Scales:   DWT={dwt_scale}, IDWT={idwt_scale}")
-    print(f"Iters:    {iterations}")
+    print(f"Device: {torch.cuda.get_device_name(0)}")
+    print(f"Input:  N={batch}, C={channels}, H={height}, W={width}")
+    print(f"Config: K={kernel_size}, L={wt_levels}")
 
-    # Input
-    x = torch.randn(batch, channels, height, width, device=device, dtype=torch.float32)
-
-    # Reference layer
+    # Data
+    x = torch.randn(batch, channels, height, width, device=device)
     ref = WTConv2d(channels, channels, kernel_size=kernel_size, wt_levels=wt_levels, wt_type="db1").to(device).eval()
-
-    # Pull weights
-    weights = []
-    for i in range(wt_levels):
-        w = ref.wavelet_convs[i].weight.detach().contiguous().to(device)
-        weights.append(w)
-
-    # Infer groups
+    weights = [ref.wavelet_convs[i].weight.detach().contiguous().to(device) for i in range(wt_levels)]
+    
     out_c, in_c, _, _ = weights[0].shape
     groups = out_c if in_c == 1 else 1
-    print(f"Groups:   {groups} ({'Depthwise' if groups > 1 else 'Dense'})")
+    print(f"Groups: {groups}")
 
-    # Build functions
-    wt_fn = _make_wtconv2d_fn(ref, x)
+    results = {}
+
+    # 1. Reference
+    print("Benchmarking Reference...")
+    ref_fn = lambda: ref(x)
+    results['PyTorch Ref'] = time_cuda(ref_fn, iters=iterations)
+
+    # 2. C++
+    if 'cpp' in modules:
+        print("Benchmarking C++ (CPU)...")
+        # Fewer iters for CPU
+        fn = make_fn(modules['cpp'], x, weights, stride, pad, groups, 0.5, 0.5, False)
+        # Dynamic CPU iters based on total iterations requested
+        cpu_iters = max(5, iterations // 5)
+        results['C++ (CPU)'] = time_cpu(fn, iters=cpu_iters)
+
+    # 3. Baseline CUDA
+    if 'cuda' in modules:
+        print("Benchmarking Baseline CUDA...")
+        fn = make_fn(modules['cuda'], x, weights, stride, pad, groups, 0.5, 0.5, True)
+        results['Baseline CUDA'] = time_cuda(fn, iters=iterations)
+
+    # 4. Optimized CUDA
+    if 'opt_cuda' in modules:
+        print("Benchmarking Optimized CUDA...")
+        fn = make_fn(modules['opt_cuda'], x, weights, stride, pad, groups, 0.5, 0.5, True)
+        results['Optimized CUDA'] = time_cuda(fn, iters=iterations)
+
+    # Report
+    print("\n--- Final Results (ms/iter) ---")
+    ref_ms = results.get('PyTorch Ref')
     
-    # 1. Reference Time (PyTorch GPU)
-    print("\nBenchmarking Reference (PyTorch GPU)...")
-    wt_ms = _time_cuda(wt_fn, iters=iterations, warmup=10)
-    print(f" -> {wt_ms:.4f} ms/iter")
-
-    # 2. C++ Time (CPU)
-    print("Benchmarking cpp_module (CPU)...")
-    cpp_fn = _make_cpp_module_fn(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
-    # Reduce iters for CPU because it is very slow
-    cpu_iters = max(5, iterations // 5)
-    cpp_ms = _time_cpu(cpp_fn, iters=cpu_iters, warmup=2)
-    print(f" -> {cpp_ms:.4f} ms/iter")
-
-    # 3. CUDA Time (GPU)
-    cuda_ms = None
-    if cuda_module is not None:
-        print("Benchmarking cuda_module (GPU)...")
-        cuda_fn = _make_cuda_module_fn(x, weights, stride, pad, groups, dwt_scale, idwt_scale)
-        cuda_ms = _time_cuda(cuda_fn, iters=iterations, warmup=10)
-        print(f" -> {cuda_ms:.4f} ms/iter")
-
-    # Results
-    print("\n--- Final Results ---")
-    print(f"WTConv2d (Ref): {wt_ms:.4f} ms")
-    print(f"cpp_module:     {cpp_ms:.4f} ms (CPU)")
-    if cuda_ms:
-        print(f"cuda_module:    {cuda_ms:.4f} ms (GPU)")
-        print(f"\n>> CUDA Kernel Speedup vs PyTorch: {wt_ms / cuda_ms:.2f}x")
+    for name, ms in results.items():
+        ratio_str = ""
+        if ref_ms:
+            factor = ref_ms / ms
+            ratio_str = f"({factor:.2f}x vs Ref)"
+            
+        print(f"{name:<15}: {ms:.4f} ms {ratio_str}")
 
 if __name__ == "__main__":
-    # You can change defaults here or import run_benchmark in another script
-    run_benchmark(wt_levels=5)
+    parser = argparse.ArgumentParser(description="WTConv2d Benchmark")
+    
+    # Flags
+    parser.add_argument("--no-build", action="store_true", help="Skip compilation step")
+    
+    # Config
+    parser.add_argument("-b", "--batch", type=int, default=16, help="Batch size")
+    parser.add_argument("-c", "--channels", type=int, default=64, help="Input/Output Channels")
+    parser.add_argument("--height", type=int, default=64, help="Input Height")
+    parser.add_argument("--width", type=int, default=64, help="Input Width")
+    parser.add_argument("-k", "--kernel-size", type=int, default=5, help="Kernel Size")
+    parser.add_argument("-l", "--levels", type=int, default=2, help="Wavelet Levels")
+    parser.add_argument("-i", "--iterations", type=int, default=100, help="Benchmark Iterations")
+
+    args = parser.parse_args()
+    
+    # 1. Run Config from Command Line
+    run_benchmark(
+        batch=args.batch,
+        channels=args.channels,
+        height=args.height,
+        width=args.width,
+        kernel_size=args.kernel_size,
+        wt_levels=args.levels,
+        iterations=args.iterations
+    )
+
+    # 2. Additional Hardcoded Tests
+    print("\n" + "="*40 + "\n[AUTO] Running Extra Sizes...\n" + "="*40)
+    
+    # Large Image, Small Kernel
+    run_benchmark(batch=64, channels=5, height=224, width=224, kernel_size=3, wt_levels=3, iterations=50)
+    
+    # Large Image, Larger Kernel
+    run_benchmark(batch=64, channels=5, height=224, width=224, kernel_size=7, wt_levels=3, iterations=50)
+
+    # Large Image, Small Kernel
+    run_benchmark(batch=64, channels=5, height=224, width=224, kernel_size=3, wt_levels=5, iterations=50)
+    
+    # Large Image, Larger Kernel
+    run_benchmark(batch=64, channels=5, height=224, width=224, kernel_size=7, wt_levels=5, iterations=50)
