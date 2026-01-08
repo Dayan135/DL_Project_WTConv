@@ -1,86 +1,118 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
-#include <pybind11/stl.h>
+#include <torch/extension.h>
+#include <vector>
 #include "cpp_kernel.h"
 
-namespace py = pybind11;
+// ------------------------------------------------------------------
+// Atomic Wrappers (Calling Raw C++ Kernels)
+// ------------------------------------------------------------------
 
-py::array_t<float> wtconv_forward_py(py::array_t<float> input, 
-                                     py::array_t<float> weight, 
-                                     int stride, int pad, int groups,
-                                     float dwt_scale, float idwt_scale) {
-    py::buffer_info buf_in = input.request();
-    py::buffer_info buf_w = weight.request();
-
-    if (buf_in.ndim != 4 || buf_w.ndim != 4) throw std::runtime_error("Inputs must be 4D");
-
-    int N = buf_in.shape[0];
-    int Cin = buf_in.shape[1];
-    int H = buf_in.shape[2];
-    int W = buf_in.shape[3];
-    int Cout_4 = buf_w.shape[0]; 
-    int K = buf_w.shape[2];
-    int Cout = Cout_4 / 4;
-
-    int H_wt = H / 2; int W_wt = W / 2;
-    int H_conv = (H_wt + 2 * pad - K) / stride + 1;
-    int W_conv = (W_wt + 2 * pad - K) / stride + 1;
-
-    auto result = py::array_t<float>({N, Cout, H_conv*2, W_conv*2});
-    py::buffer_info buf_out = result.request();
-
-    wtconv_forward(static_cast<float*>(buf_in.ptr),
-                   static_cast<float*>(buf_w.ptr),
-                   static_cast<float*>(buf_out.ptr),
-                   N, Cin, Cout, H, W, K, stride, pad, groups, dwt_scale, idwt_scale);
-
-    return result;
+torch::Tensor dwt_fwd_op(const torch::Tensor& input, float scale) {
+    int N = input.size(0); int C = input.size(1); int H = input.size(2); int W = input.size(3);
+    auto output = torch::empty({N, 4*C, H/2, W/2}, input.options());
+    
+    // Call raw C++ kernel
+    haar_dwt_2d(input.data_ptr<float>(), output.data_ptr<float>(), N, C, H, W, scale);
+    return output;
 }
 
-std::pair<py::array_t<float>, py::array_t<float>> wtconv_backward_py(
-        py::array_t<float> grad_output,
-        py::array_t<float> input,
-        py::array_t<float> weight,
-        int stride, int pad, int groups,
-        float dwt_scale, float idwt_scale) {
-
-    py::buffer_info buf_go = grad_output.request();
-    py::buffer_info buf_in = input.request();
-    py::buffer_info buf_w = weight.request();
-
-    int N = buf_in.shape[0];
-    int Cin = buf_in.shape[1];
-    int H = buf_in.shape[2];
-    int W = buf_in.shape[3];
-    int Cout_4 = buf_w.shape[0];
-    int Cin_wt_g = buf_w.shape[1];
-    int K = buf_w.shape[2];
+torch::Tensor idwt_fwd_op(const torch::Tensor& input, float scale) {
+    int N = input.size(0); int C4 = input.size(1); int C = C4/4; 
+    int H_sub = input.size(2); int W_sub = input.size(3);
+    auto output = torch::empty({N, C, H_sub*2, W_sub*2}, input.options());
     
-    auto grad_input = py::array_t<float>({N, Cin, H, W});
-    auto grad_weight = py::array_t<float>({Cout_4, Cin_wt_g, K, K});
-
-    py::buffer_info buf_gi = grad_input.request();
-    py::buffer_info buf_gw = grad_weight.request();
-
-    wtconv_backward(static_cast<float*>(buf_go.ptr),
-                    static_cast<float*>(buf_in.ptr),
-                    static_cast<float*>(buf_w.ptr),
-                    static_cast<float*>(buf_gi.ptr),
-                    static_cast<float*>(buf_gw.ptr),
-                    N, Cin, Cout_4/4, H, W, K, stride, pad, groups, dwt_scale, idwt_scale);
-
-    return {grad_input, grad_weight};
+    haar_idwt_2d(input.data_ptr<float>(), output.data_ptr<float>(), N, C, H_sub*2, W_sub*2, scale);
+    return output;
 }
 
-PYBIND11_MODULE(cpp_module, m) {
-    m.doc() = "WTConv C++ Kernel with Scaling";
+torch::Tensor conv_fwd_op(const torch::Tensor& input, const torch::Tensor& weight, int stride, int pad, int groups) {
+    int N = input.size(0); int C = input.size(1); int H = input.size(2); int W = input.size(3);
+    int Cout_4 = weight.size(0); int K = weight.size(2);
+    int Cout = Cout_4; // Weight is already [Cout, Cin/G, K, K]
+
+    int H_out = (H + 2*pad - K)/stride + 1;
+    int W_out = (W + 2*pad - K)/stride + 1;
     
-    // Default scales set to 0.5f to match previous behavior
-    m.def("wtconv_forward", &wtconv_forward_py, "Forward",
-          py::arg("input"), py::arg("weight"), py::arg("stride"), py::arg("pad"), py::arg("groups")=1,
-          py::arg("dwt_scale")=0.5f, py::arg("idwt_scale")=0.5f);
-          
-    m.def("wtconv_backward", &wtconv_backward_py, "Backward",
-          py::arg("grad_output"), py::arg("input"), py::arg("weight"), py::arg("stride"), py::arg("pad"), py::arg("groups")=1,
-          py::arg("dwt_scale")=0.5f, py::arg("idwt_scale")=0.5f);
+    auto output = torch::empty({N, Cout, H_out, W_out}, input.options());
+    
+    conv2d_forward_impl(input.data_ptr<float>(), weight.data_ptr<float>(), output.data_ptr<float>(),
+                        N, C, Cout, H, W, K, stride, pad, groups);
+    return output;
+}
+
+// ------------------------------------------------------------------
+// MAIN: Multi-Level Forward (CPU)
+// ------------------------------------------------------------------
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> wtconv_forward_multilevel(
+    torch::Tensor input, 
+    std::vector<torch::Tensor> weights, 
+    int stride, int pad, int groups, 
+    float dwt_scale, float idwt_scale) 
+{
+    // Ensure CPU
+    TORCH_CHECK(!input.is_cuda(), "Input must be CPU Tensor for cpp_module");
+
+    int levels = weights.size();
+    std::vector<torch::Tensor> saved_tensors;
+    std::vector<torch::Tensor> processed_highs;
+
+    torch::Tensor curr_ll = input;
+    
+    // --- Downward Path ---
+    for (int i = 0; i < levels; ++i) {
+        // 1. DWT
+        torch::Tensor dwt_out = dwt_fwd_op(curr_ll, dwt_scale);
+        
+        // 2. Extract Raw LL for NEXT level
+        // View as (N, C, 4, H, W)
+        int N = dwt_out.size(0); int C4 = dwt_out.size(1); int C = C4/4;
+        int H_out = dwt_out.size(2); int W_out = dwt_out.size(3);
+        
+        auto dwt_view = dwt_out.view({N, C, 4, H_out, W_out});
+        // Important: Clone to ensure it owns memory separate from dwt_out
+        torch::Tensor next_ll = dwt_view.select(2, 0).clone();
+
+        // 3. Conv
+        torch::Tensor conv_out = conv_fwd_op(dwt_out, weights[i], stride, pad, groups);
+        processed_highs.push_back(conv_out);
+        
+        // 4. Update
+        curr_ll = next_ll;
+    }
+    
+    // --- Upward Path ---
+    torch::Tensor recon_ll = torch::zeros_like(curr_ll);
+    
+    for (int i = levels - 1; i >= 0; --i) {
+        torch::Tensor level_data = processed_highs[i];
+        
+        int N = level_data.size(0); int C4 = level_data.size(1); int C = C4/4;
+        int H = level_data.size(2); int W = level_data.size(3);
+
+        auto view = level_data.view({N, C, 4, H, W});
+        auto level_ll = view.select(2, 0); 
+        
+        // Combine
+        auto combined_ll = level_ll + recon_ll;
+        
+        // Pack into IDWT input
+        auto input_to_idwt = level_data.clone();
+        input_to_idwt.view({N, C, 4, H, W}).select(2, 0).copy_(combined_ll);
+        
+        // IDWT
+        recon_ll = idwt_fwd_op(input_to_idwt, idwt_scale);
+    }
+    
+    return std::make_tuple(recon_ll, saved_tensors);
+}
+
+// Wrapper for Python
+torch::Tensor wtconv_forward_py(torch::Tensor input, std::vector<torch::Tensor> weights, 
+                                int stride, int pad, int groups, 
+                                float dwt_scale, float idwt_scale) {
+    auto result = wtconv_forward_multilevel(input, weights, stride, pad, groups, dwt_scale, idwt_scale);
+    return std::get<0>(result);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("wtconv_forward", &wtconv_forward_py, "Multi-Level Forward (CPU)");
 }
