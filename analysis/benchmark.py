@@ -8,6 +8,16 @@ import time
 # -----------------------------
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Ensure we can find compile_utils in the same folder
+sys.path.append(HERE)
+
+import compile_utils  # Import the new script
+
+# --- TRIGGER COMPILATION BEFORE IMPORTS ---
+print("--- Triggering Auto-Compilation ---")
+compile_utils.compile_all()
+# ------------------------------------------
+
 ref_repo_path = os.path.join(HERE, "Reference")
 cpp_source_path = os.path.join(HERE, "cpp_source")
 cuda_source_path = os.path.join(HERE, "cuda_source")
@@ -25,12 +35,14 @@ sys.path.append(cuda_source_path)
 # -----------------------------
 try:
     from wtconv.wtconv2d import WTConv2d
+    print("[INFO] WTConv2d loaded successfully from Reference.")
 except ImportError as e:
     print(f"[ERROR] Could not import WTConv2d from Reference: {e}")
     sys.exit(1)
 
 try:
     import cpp_module
+    print("[INFO] cpp_module loaded successfully.")
 except ImportError as e:
     print(f"[ERROR] Could not import cpp_module: {e}")
     sys.exit(1)
@@ -41,7 +53,7 @@ try:
     cuda_module = _cuda_module
     print("[INFO] cuda_module loaded successfully.")
 except ImportError:
-    print("[WARN] cuda_module could not be imported.")
+    print("[ERROR] cuda_module could not be imported.")
     cuda_module = None
 
 
