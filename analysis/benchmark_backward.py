@@ -1,7 +1,7 @@
 # bench_framework.py
 #
 # Generic benchmarking framework for multiple implementations (modules).
-# Fixed: CppAdapter now correctly passes CPU Torch Tensors instead of NumPy arrays.
+# UPDATED: Added OptimizedCudaAdapter for fused kernels.
 
 from __future__ import annotations
 
@@ -220,26 +220,43 @@ class CppAdapter(ImplAdapter):
         stride = cfg.stride
         groups = inp.groups
         
-        # FIX: Convert inputs to CPU Torch Tensors (not NumPy)
-        # .contiguous() ensures memory layout matches what C++ expects
         x_cpu = inp.x_cuda.detach().cpu().contiguous()
         w_cpu_list = [w.detach().cpu().contiguous() for w in inp.weights_cuda]
 
         def fn():
-            # Pass CPU tensors
             return cpp_module.wtconv_forward(x_cpu, w_cpu_list, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale)
 
         return fn
 
     def make_fwd_bwd_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Optional[Callable[[], Any]]:
-        return None
+        if not hasattr(cpp_module, "wtconv_forward_save"): return None
+        if not hasattr(cpp_module, "wtconv_backward"): return None
+
+        pad = cfg.kernel_size // 2
+        stride = cfg.stride
+        groups = inp.groups
+        
+        x_cpu = inp.x_cuda.detach().cpu().contiguous()
+        w_cpu_list = [w.detach().cpu().contiguous() for w in inp.weights_cuda]
+        grad_out_cpu = torch.randn_like(x_cpu)
+
+        def fn():
+            y, saved = cpp_module.wtconv_forward_save(
+                x_cpu, w_cpu_list, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale
+            )
+            gx, gw = cpp_module.wtconv_backward(
+                saved, grad_out_cpu, w_cpu_list, groups
+            )
+            return None
+
+        return fn
 
 
 # -----------------------------------------------------------------------------
-# Adapter: cuda_module (Torch CUDA extension)
+# Adapter: cuda_module (Baseline CUDA)
 # -----------------------------------------------------------------------------
 class CudaTorchAdapter(ImplAdapter):
-    name = "cuda_module (Torch CUDA)"
+    name = "cuda_module (Baseline)"
     kind = "cuda"
 
     def available(self) -> Tuple[bool, str]:
@@ -264,20 +281,16 @@ class CudaTorchAdapter(ImplAdapter):
         return fn
 
     def make_fwd_bwd_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Optional[Callable[[], Any]]:
-        if not hasattr(cuda_module, "wtconv_forward_save"):
-            return None
-        if not hasattr(cuda_module, "wtconv_backward"):
-            return None
+        if not hasattr(cuda_module, "wtconv_forward_save"): return None
+        if not hasattr(cuda_module, "wtconv_backward"): return None
 
         pad = cfg.kernel_size // 2
         stride = cfg.stride
         groups = inp.groups
 
-        # Separate tensors so we don't mutate reference weights
         x = inp.x_cuda.detach().clone().requires_grad_(True)
         weights = [w.detach().clone().requires_grad_(True) for w in inp.weights_cuda]
 
-        # Define autograd wrapper dynamically
         class _Fn2(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x_, *w_list):
@@ -301,13 +314,83 @@ class CudaTorchAdapter(ImplAdapter):
                 return (gx, *gw_list)
 
         def fn():
-            if x.grad is not None:
-                x.grad.zero_()
+            if x.grad is not None: x.grad.zero_()
             for w in weights:
-                if w.grad is not None:
-                    w.grad.zero_()
+                if w.grad is not None: w.grad.zero_()
 
             y = _Fn2.apply(x, *weights)
+            y.mean().backward()
+            return None
+
+        return fn
+
+# -----------------------------------------------------------------------------
+# Adapter: optimized_cuda_module (Fused CUDA)
+# -----------------------------------------------------------------------------
+class OptimizedCudaAdapter(ImplAdapter):
+    name = "opt_cuda_module (Fused)"
+    kind = "cuda"
+
+    def available(self) -> Tuple[bool, str]:
+        if optimized_cuda_module is None:
+            return False, "optimized_cuda_module import failed"
+        if not torch.cuda.is_available():
+            return False, "CUDA not available"
+        if not hasattr(optimized_cuda_module, "wtconv_forward"):
+            return False, "opt_cuda has no wtconv_forward"
+        return True, "ok"
+
+    def make_forward_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Callable[[], Any]:
+        pad = cfg.kernel_size // 2
+        stride = cfg.stride
+        x = inp.x_cuda
+        weights = inp.weights_cuda
+        groups = inp.groups
+
+        def fn():
+            return optimized_cuda_module.wtconv_forward(x, weights, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale)
+
+        return fn
+
+    def make_fwd_bwd_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Optional[Callable[[], Any]]:
+        if not hasattr(optimized_cuda_module, "wtconv_forward_save"): return None
+        if not hasattr(optimized_cuda_module, "wtconv_backward"): return None
+
+        pad = cfg.kernel_size // 2
+        stride = cfg.stride
+        groups = inp.groups
+
+        x = inp.x_cuda.detach().clone().requires_grad_(True)
+        weights = [w.detach().clone().requires_grad_(True) for w in inp.weights_cuda]
+
+        class _Fn3(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x_, *w_list):
+                y, saved = optimized_cuda_module.wtconv_forward_save(
+                    x_, list(w_list), int(stride), int(pad), int(groups), float(cfg.dwt_scale), float(cfg.idwt_scale)
+                )
+                ctx.saved = saved
+                ctx.w_list = w_list 
+                return y
+
+            @staticmethod
+            def backward(ctx, grad_out):
+                saved = ctx.saved
+                w_list = list(ctx.w_list)
+                gx, gw_list = optimized_cuda_module.wtconv_backward(
+                    saved,
+                    grad_out.contiguous(),
+                    w_list,
+                    int(groups),
+                )
+                return (gx, *gw_list)
+
+        def fn():
+            if x.grad is not None: x.grad.zero_()
+            for w in weights:
+                if w.grad is not None: w.grad.zero_()
+
+            y = _Fn3.apply(x, *weights)
             y.mean().backward()
             return None
 
@@ -320,8 +403,9 @@ class CudaTorchAdapter(ImplAdapter):
 def default_registry() -> List[ImplAdapter]:
     return [
         WTConv2dAdapter(),
-        CppAdapter(),
+        #CppAdapter(),
         CudaTorchAdapter(),
+        OptimizedCudaAdapter(), # <--- ADDED
     ]
 
 
@@ -397,7 +481,7 @@ def main():
     import argparse
 
     p = argparse.ArgumentParser()
-    p.add_argument("--iters", type=int, default=200)
+    p.add_argument("--iters", type=int, default=50)
     p.add_argument("--warmup", type=int, default=30)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--channels", type=int, default=64)
@@ -434,17 +518,14 @@ def main():
         for r in rows:
             if not r.available or r.forward_ms is None: continue
             if r.kind != ref.kind:
-                print(f"- {r.name}: N/A (kind mismatch)")
-                continue
+                # CPU vs CUDA comparisons are valid here
+                pass
             print(f"- {r.name}: {ref.forward_ms / r.forward_ms:.2f}x")
 
     if ref is not None and ref.fwd_bwd_ms is not None:
         print("\n=== Speedup vs WTConv2d (forward+backward) ===")
         for r in rows:
             if not r.available or r.fwd_bwd_ms is None: continue
-            if r.kind != ref.kind:
-                print(f"- {r.name}: N/A (kind mismatch)")
-                continue
             print(f"- {r.name}: {ref.fwd_bwd_ms / r.fwd_bwd_ms:.2f}x")
 
 

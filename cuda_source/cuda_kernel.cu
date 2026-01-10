@@ -12,11 +12,10 @@
     } while (0)
 
 // ------------------------------------------------------------------
-// 1. DWT Kernels
+// DWT
 // ------------------------------------------------------------------
 __global__ void haar_dwt_fwd_kernel(const float* __restrict__ input, float* __restrict__ output,
                                     int N, int C, int H, int W, float scale) {
-    // Standard Haar DWT Forward logic
     int out_h = H / 2;
     int out_w = W / 2;
     int n = blockIdx.z;
@@ -25,25 +24,22 @@ __global__ void haar_dwt_fwd_kernel(const float* __restrict__ input, float* __re
     
     int h = hw / out_w; 
     int w = hw % out_w;
+    
     if (h >= out_h || w >= out_w || n >= N || c >= C) return;
 
     int in_idx = (n*C + c)*(H*W);
     int row_stride = W;
     
-    // Read 2x2 block
     float x00 = input[in_idx + (2*h)*row_stride + (2*w)];
     float x01 = input[in_idx + (2*h)*row_stride + (2*w+1)];
     float x10 = input[in_idx + (2*h+1)*row_stride + (2*w)];
     float x11 = input[in_idx + (2*h+1)*row_stride + (2*w+1)];
 
-    // LL, LH, HL, HH
     float ll = (x00 + x01 + x10 + x11) * scale;
     float lh = (x00 + x01 - x10 - x11) * scale;
     float hl = (x00 - x01 + x10 - x11) * scale;
     float hh = (x00 - x01 - x10 + x11) * scale;
 
-    // Output is Interleaved: (N, 4C, H/2, W/2)
-    // 4C layout: [LL for c=0, LH, HL, HH], [LL for c=1...]
     int out_plane_sz = out_h * out_w;
     float* out_base = output + n*(4*C*out_plane_sz);
     
@@ -53,16 +49,8 @@ __global__ void haar_dwt_fwd_kernel(const float* __restrict__ input, float* __re
     out_base[(4*c+3)*out_plane_sz + hw] = hh;
 }
 
-// Reuse forward logic for backward input gradient (symmetric for Haar)
 __global__ void haar_dwt_bwd_kernel(const float* __restrict__ grad_output, float* __restrict__ grad_input,
                                     int N, int C, int H, int W, float scale) {
-    // DWT Backward is effectively an IDWT on the gradients
-    // Input: grad_output (N, 4C, H/2, W/2)
-    // Output: grad_input (N, C, H, W)
-    // BUT! Since we defined DWT as matrix multiplication, DWT_bwd is Transpose(DWT).
-    // For orthonormal Haar, Transpose(DWT) == IDWT.
-    // So we actually run the IDWT logic here.
-    
     int in_h = H / 2;
     int in_w = W / 2;
     int n = blockIdx.z;
@@ -71,6 +59,7 @@ __global__ void haar_dwt_bwd_kernel(const float* __restrict__ grad_output, float
     
     int h = hw / in_w; 
     int w = hw % in_w;
+    
     if (h >= in_h || w >= in_w || n >= N || c >= C) return;
 
     int in_plane_sz = in_h * in_w;
@@ -81,7 +70,6 @@ __global__ void haar_dwt_bwd_kernel(const float* __restrict__ grad_output, float
     float dhl = go_base[(4*c+2)*in_plane_sz + hw];
     float dhh = go_base[(4*c+3)*in_plane_sz + hw];
 
-    // Reconstruction logic (same as IDWT)
     float dx00 = (dll + dlh + dhl + dhh) * scale;
     float dx01 = (dll + dlh - dhl - dhh) * scale;
     float dx10 = (dll - dlh + dhl - dhh) * scale;
@@ -90,24 +78,24 @@ __global__ void haar_dwt_bwd_kernel(const float* __restrict__ grad_output, float
     int out_stride = W;
     float* gi_base = grad_input + (n*C + c)*(H*W);
     
-    gi_base[(2*h)*out_stride + (2*w)]   = dx00;
-    gi_base[(2*h)*out_stride + (2*w+1)] = dx01;
-    gi_base[(2*h+1)*out_stride + (2*w)] = dx10;
+    gi_base[(2*h)*out_stride + (2*w)]     = dx00;
+    gi_base[(2*h)*out_stride + (2*w+1)]   = dx01;
+    gi_base[(2*h+1)*out_stride + (2*w)]   = dx10;
     gi_base[(2*h+1)*out_stride + (2*w+1)] = dx11;
 }
 
 // ------------------------------------------------------------------
-// 2. IDWT Kernels
+// IDWT
 // ------------------------------------------------------------------
 __global__ void haar_idwt_fwd_kernel(const float* __restrict__ input, float* __restrict__ output,
                                      int N, int C, int H, int W, float scale) {
-    // Standard IDWT Forward
     int in_h = H / 2;
     int in_w = W / 2;
     int n = blockIdx.z;
     int c = blockIdx.y;
     int hw = blockIdx.x * blockDim.x + threadIdx.x;
     int h = hw / in_w; int w = hw % in_w;
+    
     if (h >= in_h || w >= in_w || n >= N || c >= C) return;
 
     int in_plane_sz = in_h * in_w;
@@ -124,26 +112,21 @@ __global__ void haar_idwt_fwd_kernel(const float* __restrict__ input, float* __r
     float x11 = (ll - lh - hl + hh) * scale;
 
     float* out_base = output + (n*C+c)*(H*W);
-    out_base[(2*h)*W + (2*w)]   = x00;
-    out_base[(2*h)*W + (2*w+1)] = x01;
-    out_base[(2*h+1)*W + (2*w)] = x10;
+    out_base[(2*h)*W + (2*w)]     = x00;
+    out_base[(2*h)*W + (2*w+1)]   = x01;
+    out_base[(2*h+1)*W + (2*w)]   = x10;
     out_base[(2*h+1)*W + (2*w+1)] = x11;
 }
 
-// IDWT Backward (Grad Output -> Grad Input)
-// IDWT Bwd is Transpose(IDWT) == DWT.
-// So we use DWT logic here.
 __global__ void haar_idwt_bwd_kernel(const float* __restrict__ grad_output, float* __restrict__ grad_input,
                                      int N, int C, int H, int W, float scale) {
-    // Input: grad_output (N, C, H, W)
-    // Output: grad_input (N, 4C, H/2, W/2)
-    
     int out_h = H / 2;
     int out_w = W / 2;
     int n = blockIdx.z;
     int c = blockIdx.y;
     int hw = blockIdx.x * blockDim.x + threadIdx.x;
     int h = hw / out_w; int w = hw % out_w;
+    
     if (h >= out_h || w >= out_w || n >= N || c >= C) return;
 
     const float* go_base = grad_output + (n*C+c)*(H*W);
@@ -154,7 +137,6 @@ __global__ void haar_idwt_bwd_kernel(const float* __restrict__ grad_output, floa
     float g10 = go_base[(2*h+1)*row_stride + (2*w)];
     float g11 = go_base[(2*h+1)*row_stride + (2*w+1)];
 
-    // DWT Logic
     float dll = (g00 + g01 + g10 + g11) * scale;
     float dlh = (g00 + g01 - g10 - g11) * scale;
     float dhl = (g00 - g01 + g10 - g11) * scale;
@@ -170,7 +152,7 @@ __global__ void haar_idwt_bwd_kernel(const float* __restrict__ grad_output, floa
 }
 
 // ------------------------------------------------------------------
-// 3. Conv Kernels (Reuse Previous Naive Implementations)
+// Conv
 // ------------------------------------------------------------------
 __global__ void conv2d_dw_fwd_kernel(const float* __restrict__ input, const float* __restrict__ weight, float* __restrict__ output,
                                      int N, int C, int H, int W, int K, int Stride, int Pad, int H_out, int W_out) {
@@ -201,7 +183,7 @@ __global__ void conv2d_dw_fwd_kernel(const float* __restrict__ input, const floa
     output[(n*C+c)*(H_out*W_out) + hw] = sum;
 }
 
-// Backward Input Kernel
+// BWD INPUT
 __global__ void conv2d_dw_bwd_in_kernel(const float* __restrict__ grad_out, const float* __restrict__ weight, float* __restrict__ grad_in,
                                         int N, int C, int H_in, int W_in, int K, int Stride, int Pad, int H_out, int W_out) {
     int n = blockIdx.z;
@@ -211,19 +193,23 @@ __global__ void conv2d_dw_bwd_in_kernel(const float* __restrict__ grad_out, cons
     int w_in = hw % W_in;
     if (h_in >= H_in || w_in >= W_in || n >= N || c >= C) return;
 
+    float sum = 0.0f;
     const float* go_ptr = grad_out + (n*C+c)*(H_out*W_out);
     const float* w_ptr = weight + c*(K*K);
-    
-    float sum = 0.0f;
+
     for(int kh=0; kh<K; ++kh) {
-        for(int kw=0; kw<K; ++kw) {
-            int h_out = (h_in + Pad - kh);
-            int w_out = (w_in + Pad - kw);
-            if(h_out % Stride == 0 && w_out % Stride == 0) {
-                h_out /= Stride;
-                w_out /= Stride;
-                if(h_out >= 0 && h_out < H_out && w_out >= 0 && w_out < W_out) {
-                    sum += go_ptr[h_out*W_out + w_out] * w_ptr[kh*K+kw];
+        int h_out_idx = h_in + Pad - kh;
+        if (h_out_idx % Stride == 0) {
+            int h_k = h_out_idx / Stride;
+            if(h_k >= 0 && h_k < H_out) {
+                for(int kw=0; kw<K; ++kw) {
+                    int w_out_idx = w_in + Pad - kw;
+                    if (w_out_idx % Stride == 0) {
+                        int w_k = w_out_idx / Stride;
+                        if(w_k >= 0 && w_k < W_out) {
+                            sum += go_ptr[h_k*W_out + w_k] * w_ptr[kh*K+kw];
+                        }
+                    }
                 }
             }
         }
@@ -231,35 +217,37 @@ __global__ void conv2d_dw_bwd_in_kernel(const float* __restrict__ grad_out, cons
     grad_in[(n*C+c)*(H_in*W_in) + hw] = sum;
 }
 
-// Backward Weight Kernel
+// BWD WEIGHT
 __global__ void conv2d_dw_bwd_w_kernel(const float* __restrict__ grad_out, const float* __restrict__ input, float* __restrict__ grad_weight,
                                        int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
+    // One thread per weight element per channel
     int c = blockIdx.y;
-    int kk = blockIdx.x * blockDim.x + threadIdx.x;
-    int kh = kk / K;
-    int kw = kk % K;
-    if (kh >= K || kw >= K || c >= C) return;
+    int kw_idx = blockIdx.x * blockDim.x + threadIdx.x; // 0..K*K
+    if (c >= C || kw_idx >= K*K) return;
+
+    int kh = kw_idx / K;
+    int kw = kw_idx % K;
 
     float sum = 0.0f;
     for(int n=0; n<N; ++n) {
         const float* go_ptr = grad_out + (n*C+c)*(H_out*W_out);
         const float* in_ptr = input + (n*C+c)*(H_in*W_in);
         
-        for(int h_out=0; h_out<H_out; ++h_out) {
-            for(int w_out=0; w_out<W_out; ++w_out) {
-                int h_in = h_out*Stride - Pad + kh;
-                int w_in = w_out*Stride - Pad + kw;
+        for(int h=0; h<H_out; ++h) {
+            for(int w=0; w<W_out; ++w) {
+                int h_in = h*Stride - Pad + kh;
+                int w_in = w*Stride - Pad + kw;
                 if(h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                    sum += go_ptr[h_out*W_out + w_out] * in_ptr[h_in*W_in + w_in];
+                    sum += go_ptr[h*W_out+w] * in_ptr[h_in*W_in + w_in];
                 }
             }
         }
     }
-    atomicAdd(&grad_weight[c*(K*K) + kh*K+kw], sum);
+    grad_weight[c*(K*K) + kw_idx] = sum;
 }
 
 // ------------------------------------------------------------------
-// Host Launchers
+// Launchers
 // ------------------------------------------------------------------
 void launch_dwt_forward(const float* input, float* output, int N, int C, int H, int W, float scale) {
     dim3 block(256);
@@ -307,8 +295,8 @@ void launch_conv_depthwise_bwd_in(const float* grad_out, const float* weight, fl
 
 void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight,
                                  int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
-    dim3 block(256);
-    dim3 grid((K*K + 255)/256, C, 1);
+    dim3 block(K*K);
+    dim3 grid(1, C);
     conv2d_dw_bwd_w_kernel<<<grid, block>>>(grad_out, input, grad_weight, N, C, H_out, W_out, K, Stride, Pad, H_in, W_in);
     CUDA_CHECK(cudaGetLastError());
 }

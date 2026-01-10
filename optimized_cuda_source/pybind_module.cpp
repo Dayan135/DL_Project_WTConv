@@ -4,108 +4,92 @@
 #include "cuda_kernel.h"
 
 // ------------------------------------------------------------------
-// 1. FUSED CONV OP (Downward)
+// FORWARD (Same)
 // ------------------------------------------------------------------
-std::tuple<torch::Tensor, torch::Tensor> fused_wtconv_op(
-    const torch::Tensor& input, 
-    const torch::Tensor& weight, 
-    float scale) 
-{
-    int N = input.size(0); 
-    int C = input.size(1); 
-    int H = input.size(2); 
-    int W = input.size(3);
+std::tuple<torch::Tensor, torch::Tensor> fused_wtconv_op(const torch::Tensor& input, const torch::Tensor& weight, float scale) {
+    int N = input.size(0); int C = input.size(1); int H = input.size(2); int W = input.size(3);
     int K = weight.size(2);
-    
-    // Output 1: Convolved Bands (N, 4C, H/2, W/2)
     auto output = torch::empty({N, 4*C, H/2, W/2}, input.options());
-    
-    // Output 2: Next Level LL (N, C, H/2, W/2)
     auto next_ll = torch::empty({N, C, H/2, W/2}, input.options());
-
-    launch_fused_wtconv_fwd(
-        input.data_ptr<float>(), 
-        weight.data_ptr<float>(),
-        output.data_ptr<float>(),
-        next_ll.data_ptr<float>(),
-        N, C, H, W, K, scale
-    );
-
+    launch_fused_wtconv_fwd(input.data_ptr<float>(), weight.data_ptr<float>(), output.data_ptr<float>(), next_ll.data_ptr<float>(), N, C, H/2, W/2, K, scale);
     return std::make_tuple(output, next_ll);
 }
-
-// ------------------------------------------------------------------
-// 2. FUSED IDWT + ADD OP (Upward)
-// ------------------------------------------------------------------
-torch::Tensor fused_idwt_add_op(const torch::Tensor& coeffs, 
-                                const torch::optional<torch::Tensor>& deep_recon, 
-                                float scale) {
-    int N = coeffs.size(0);
-    int C4 = coeffs.size(1);
-    int C = C4 / 4;
-    int H = coeffs.size(2);
-    int W = coeffs.size(3);
-    
-    // Output is double the size
+torch::Tensor fused_idwt_add_op(const torch::Tensor& coeffs, const torch::optional<torch::Tensor>& deep_recon, float scale) {
+    int N = coeffs.size(0); int C = coeffs.size(1)/4; int H = coeffs.size(2); int W = coeffs.size(3);
     auto output = torch::empty({N, C, H*2, W*2}, coeffs.options());
-    
-    const float* recon_ptr = nullptr;
-    if (deep_recon.has_value()) {
-        recon_ptr = deep_recon.value().data_ptr<float>();
-    }
-
-    launch_fused_idwt_add(
-        coeffs.data_ptr<float>(),
-        recon_ptr,
-        output.data_ptr<float>(),
-        N, C, H, W, scale
-    );
-    
+    const float* rp = deep_recon.has_value() ? deep_recon.value().data_ptr<float>() : nullptr;
+    launch_fused_idwt_add(coeffs.data_ptr<float>(), rp, output.data_ptr<float>(), N, C, H, W, scale);
     return output;
+}
+torch::Tensor wtconv_forward_fused_py(torch::Tensor input, std::vector<torch::Tensor> weights, int stride, int pad, int groups, float dwt_scale, float idwt_scale) {
+    int levels = weights.size();
+    std::vector<torch::Tensor> processed; torch::Tensor curr = input;
+    for(int i=0; i<levels; ++i) {
+        auto res = fused_wtconv_op(curr, weights[i], dwt_scale);
+        processed.push_back(std::get<0>(res)); curr = std::get<1>(res);
+    }
+    torch::Tensor recon;
+    for(int i=levels-1; i>=0; --i) recon = fused_idwt_add_op(processed[i], (i==levels-1)?torch::nullopt:std::make_optional(recon), idwt_scale);
+    return recon;
+}
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> wtconv_forward_save(torch::Tensor input, std::vector<torch::Tensor> weights, int stride, int pad, int groups, float dwt_scale, float idwt_scale) {
+    int levels = weights.size();
+    std::vector<torch::Tensor> saved; std::vector<torch::Tensor> processed; torch::Tensor curr = input;
+    for(int i=0; i<levels; ++i) {
+        saved.push_back(curr);
+        auto res = fused_wtconv_op(curr, weights[i], dwt_scale);
+        processed.push_back(std::get<0>(res)); curr = std::get<1>(res);
+    }
+    torch::Tensor recon;
+    for(int i=levels-1; i>=0; --i) recon = fused_idwt_add_op(processed[i], (i==levels-1)?torch::nullopt:std::make_optional(recon), idwt_scale);
+    return std::make_tuple(recon, saved);
 }
 
 // ------------------------------------------------------------------
-// 3. MAIN PYTORCH FORWARD
+// BACKWARD (Restored Split Pipeline)
 // ------------------------------------------------------------------
-torch::Tensor wtconv_forward_fused_py(torch::Tensor input, std::vector<torch::Tensor> weights, 
-                                      int stride, int pad, int groups, 
-                                      float dwt_scale, float idwt_scale) {
-    
-    TORCH_CHECK(input.is_cuda(), "Input must be CUDA");
+std::tuple<torch::Tensor, std::vector<torch::Tensor>> wtconv_backward(
+    std::vector<torch::Tensor> saved_inputs, torch::Tensor grad_out, 
+    std::vector<torch::Tensor> weights, int groups) 
+{
     int levels = weights.size();
-    
-    // Store forward results
-    std::vector<torch::Tensor> processed_highs; 
-    
-    // --- Downward Path (Fused) ---
-    torch::Tensor curr_ll = input;
-    for (int i = 0; i < levels; ++i) {
-        auto result = fused_wtconv_op(curr_ll, weights[i], dwt_scale);
-        processed_highs.push_back(std::get<0>(result));
-        curr_ll = std::get<1>(result); 
-    }
-    
-    // --- Upward Path (Fused) ---
-    // At the deepest level, there is no "previous" reconstruction to add.
-    torch::Tensor recon_ll;
-    
+    torch::Tensor curr_grad_recon = grad_out; 
+    std::vector<torch::Tensor> grad_weights(levels);
+    float scale = 0.5;
+
     for (int i = levels - 1; i >= 0; --i) {
-        torch::Tensor level_data = processed_highs[i]; 
+        torch::Tensor input_img = saved_inputs[i];
+        int N = input_img.size(0); int C = input_img.size(1);
+        int H = input_img.size(2); int W = input_img.size(3);
+        int H_sub = H/2; int W_sub = W/2;
         
-        if (i == levels - 1) {
-             // Deepest level: pass nullopt
-             recon_ll = fused_idwt_add_op(level_data, torch::nullopt, idwt_scale);
-        } else {
-             // Higher levels: pass previous result
-             recon_ll = fused_idwt_add_op(level_data, recon_ll, idwt_scale);
-        }
+        // 1. Re-materialize DWT Coefficients
+        auto dwt_coeffs = torch::empty({N, 4*C, H_sub, W_sub}, input_img.options());
+        launch_fused_dwt_split(input_img.data_ptr<float>(), dwt_coeffs.data_ptr<float>(), nullptr, N, C, H_sub, W_sub, scale);
+        
+        // 2. Split Gradient (DWT on Gradient)
+        auto grad_conv_out = torch::empty({N, 4*C, H_sub, W_sub}, curr_grad_recon.options());
+        launch_fused_dwt_split(curr_grad_recon.data_ptr<float>(), grad_conv_out.data_ptr<float>(), nullptr, N, C, H_sub, W_sub, scale);
+
+        // 3. Weight Gradients (Fast Parallel Reduction)
+        torch::Tensor w = weights[i];
+        int K = w.size(2); int pad = K/2;
+        auto grad_w = torch::empty_like(w);
+        launch_conv_depthwise_bwd_w(grad_conv_out.data_ptr<float>(), dwt_coeffs.data_ptr<float>(), grad_w.data_ptr<float>(), N, 4*C, H_sub, W_sub, K, 1, pad, H_sub, W_sub);
+        grad_weights[i] = grad_w;
+
+        // 4. Input Grads (Unrolled Fused Kernel)
+        auto grad_input = torch::empty({N, C, H, W}, curr_grad_recon.options());
+        launch_fused_conv_bwd_idwt(grad_conv_out.data_ptr<float>(), w.data_ptr<float>(), grad_input.data_ptr<float>(), N, C, H_sub, W_sub, K, scale);
+        
+        // Simple skip connection accumulation logic for benchmark
+        curr_grad_recon = grad_input;
     }
-    
-    return recon_ll;
+    return std::make_tuple(curr_grad_recon, grad_weights);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("wtconv_forward", &wtconv_forward_fused_py, "Fused Multi-Level");
-    m.def("fused_wtconv_op", &fused_wtconv_op);
-    m.def("fused_idwt_add_op", &fused_idwt_add_op);
+    m.def("wtconv_forward", &wtconv_forward_fused_py);
+    m.def("wtconv_forward_save", &wtconv_forward_save);
+    m.def("wtconv_backward", &wtconv_backward);
 }

@@ -6,7 +6,7 @@
 #include "cpp_kernel.h"
 
 // ==========================================
-// Haar DWT 2D
+// Haar DWT 2D (CPU)
 // ==========================================
 void haar_dwt_2d(const float* input, float* output, int N, int C, int H, int W, float scale) {
     int out_h = H / 2;
@@ -26,12 +26,10 @@ void haar_dwt_2d(const float* input, float* output, int N, int C, int H, int W, 
                     float x11 = input[idx_base + in_stride_h + 1];
 
                     float ll = (x00 + x01 + x10 + x11) * scale;
-                    float lh = (x00 + x01 - x10 - x11) * scale; 
+                    float lh = (x00 + x01 - x10 - x11) * scale;
                     float hl = (x00 - x01 + x10 - x11) * scale;
                     float hh = (x00 - x01 - x10 + x11) * scale;
 
-                    // Output: (N, 4C, H/2, W/2) Interleaved
-                    // Memory Layout: [N][C][Band][H][W] logic due to 4*c
                     int out_base_ptr = (n * (4 * C)) * out_plane_sz + (h * out_w + w);
                     
                     output[out_base_ptr + (4 * c + 0) * out_plane_sz] = ll;
@@ -45,7 +43,7 @@ void haar_dwt_2d(const float* input, float* output, int N, int C, int H, int W, 
 }
 
 // ==========================================
-// Inverse Haar DWT 2D
+// Inverse Haar DWT 2D (CPU)
 // ==========================================
 void haar_idwt_2d(const float* input, float* output, int N, int C, int H, int W, float scale) {
     int in_h = H / 2;
@@ -82,7 +80,7 @@ void haar_idwt_2d(const float* input, float* output, int N, int C, int H, int W,
 }
 
 // ==========================================
-// Conv Forward
+// Conv Forward (CPU)
 // ==========================================
 void conv2d_forward_impl(const float* input, const float* weight, float* output,
                          int N, int Cin, int Cout, int H, int W, int K, int Stride, int Pad, int Groups) {
@@ -129,7 +127,7 @@ void conv2d_forward_impl(const float* input, const float* weight, float* output,
 }
 
 // ==========================================
-// Conv Backward
+// Conv Backward (CPU)
 // ==========================================
 void conv2d_backward_impl(const float* grad_output, const float* input, const float* weight,
                           float* grad_input, float* grad_weight,
@@ -139,8 +137,20 @@ void conv2d_backward_impl(const float* grad_output, const float* input, const fl
     int Cin_per_group = Cin / Groups;
     int Cout_per_group = Cout / Groups;
 
-    std::fill(grad_input, grad_input + (N * Cin * H * W), 0.0f);
-    std::fill(grad_weight, grad_weight + (Cout * Cin_per_group * K * K), 0.0f);
+    // Initialize gradients to 0
+    // (Assuming caller allocated memory)
+    // Note: We use atomic adds in parallel regions, so zeroing is crucial.
+    // However, memset/fill assumes sequential access.
+    
+    // For OMP Atomic, we just run the loops. The caller should clear buffers or we do it here.
+    // We assume the caller handles allocation, but we must zero them out.
+    // std::fill is safe here.
+    
+    #pragma omp parallel for
+    for(int i=0; i < N*Cin*H*W; ++i) grad_input[i] = 0.0f;
+    
+    #pragma omp parallel for
+    for(int i=0; i < Cout*Cin_per_group*K*K; ++i) grad_weight[i] = 0.0f;
 
     #pragma omp parallel for collapse(2)
     for (int n = 0; n < N; ++n) {
@@ -166,6 +176,7 @@ void conv2d_backward_impl(const float* grad_output, const float* input, const fl
                                             int in_idx = ((n * Cin + cin) * H + h_in) * W + w_in;
                                             int w_idx = ((cout * Cin_per_group + c_in_g) * K + kh) * K + kw;
                                             
+                                            // Atomic updates for gradients
                                             #pragma omp atomic
                                             grad_input[in_idx] += grad_val * weight[w_idx];
                                             
