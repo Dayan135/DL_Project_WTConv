@@ -348,12 +348,16 @@ class OptimizedCudaAdapter(ImplAdapter):
         groups = inp.groups
 
         def fn():
-            return optimized_cuda_module.wtconv_forward(x, weights, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale)
+            # training=False by default (Inference Mode) - returns tuple, we take element 0
+            out, _ = optimized_cuda_module.wtconv_forward(
+                x, weights, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale, False
+            )
+            return out
 
         return fn
 
     def make_fwd_bwd_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Optional[Callable[[], Any]]:
-        if not hasattr(optimized_cuda_module, "wtconv_forward_save"): return None
+        # Need backward function
         if not hasattr(optimized_cuda_module, "wtconv_backward"): return None
 
         pad = cfg.kernel_size // 2
@@ -366,8 +370,10 @@ class OptimizedCudaAdapter(ImplAdapter):
         class _Fn3(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x_, *w_list):
-                y, saved = optimized_cuda_module.wtconv_forward_save(
-                    x_, list(w_list), int(stride), int(pad), int(groups), float(cfg.dwt_scale), float(cfg.idwt_scale)
+                # training=True (Training Mode)
+                y, saved = optimized_cuda_module.wtconv_forward(
+                    x_, list(w_list), int(stride), int(pad), int(groups), 
+                    float(cfg.dwt_scale), float(cfg.idwt_scale), True
                 )
                 ctx.saved = saved
                 ctx.w_list = w_list 
