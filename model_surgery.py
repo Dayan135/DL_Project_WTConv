@@ -7,9 +7,20 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'Reference'))
 
 try:
-    from wtconv.wtconv2d import WTConv2d
+    from  Reference.wtconv.wtconv2d import WTConv2d
 except ImportError:
     print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")
+
+try:
+    from cpp_source.wtconv_cpp import WTConv2d_CPP
+except ImportError:
+    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")    
+
+try:
+    from cuda_source.wtconv_cuda import WTConv2d_CUDA
+except ImportError:
+    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")       
+
 
 def replace_conv_with_wtconv(module, container_name='model', target_impl='reference', verbose=True):
     """
@@ -43,7 +54,7 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
                 'kernel_size': child.kernel_size if isinstance(child.kernel_size, int) else child.kernel_size[0],
                 'stride': child.stride if isinstance(child.stride, int) else child.stride[0],
                 'bias': (child.bias is not None),
-                'wt_levels': 1, 
+                'wt_levels': 2, 
                 'wt_type': 'db1' 
             }
 
@@ -53,6 +64,11 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
                     new_layer = WTConv2d(**config)
                 
                 # (Add your cpp/cuda placeholders here later)
+                elif target_impl == 'cpp':
+                    new_layer = WTConv2d_CPP(**config)
+
+                elif target_impl == 'cuda':
+                    new_layer = WTConv2d_CUDA(**config)    
                 
                 else:
                     raise ValueError(f"Unknown impl: {target_impl}")
