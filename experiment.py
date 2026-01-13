@@ -55,7 +55,15 @@ def get_dataset(batch_size, num_workers):
     root_dir = os.path.join(os.path.dirname(__file__), 'data')
     os.makedirs(root_dir, exist_ok=True)
 
-    trainset = torchvision.datasets.Imagenette(root=root_dir, split='train', download=True, transform=transform)
+    try:
+        trainset = torchvision.datasets.Imagenette(root=root_dir, split='train', download=True, transform=transform)
+    except RuntimeError as e:
+        if "already exists" in str(e):
+            print("    ⚠️  Dataset directory exists. Attempting to load without download...")
+            trainset = torchvision.datasets.Imagenette(root=root_dir, split='train', download=False, transform=transform)
+        else:
+            raise e
+
     loader = torch.utils.data.DataLoader(
         trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True
     )
