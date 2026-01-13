@@ -1,7 +1,6 @@
-# bench_framework.py
-#
+
 # Generic benchmarking framework for multiple implementations (modules).
-# UPDATED: Added OptimizedCudaAdapter for fused kernels.
+# UPDATED: Added Optimized2CudaAdapter for fused kernels V2.
 
 from __future__ import annotations
 
@@ -25,7 +24,6 @@ sys.path.append(ANALYSIS_DIR)
 import compile_utils
 
 # Check for --no-build flag *before* we do anything else
-# We prefer manual check here because we need to set the env var BEFORE imports might trigger compilation
 if "--no-build" in sys.argv:
     os.environ["SKIP_COMPILE"] = "1"
     print("[INFO] Compilation disabled via --no-build")
@@ -40,11 +38,13 @@ ref_repo_path = os.path.join(HERE, "Reference")
 cpp_source_path = os.path.join(HERE, "cpp_source")
 cuda_source_path = os.path.join(HERE, "cuda_source")
 opt_cuda_source_path = os.path.join(HERE, "optimized_cuda_source")
+opt2_cuda_source_path = os.path.join(HERE, "optimized2_cuda_source") # <--- ADDED
 
 sys.path.insert(0, ref_repo_path)
 sys.path.append(cpp_source_path)
 sys.path.append(cuda_source_path)
 sys.path.append(opt_cuda_source_path)
+sys.path.append(opt2_cuda_source_path) # <--- ADDED
 
 # --- Load Modules ---
 modules = {}
@@ -53,6 +53,8 @@ except: pass
 try: import cuda_module; modules['cuda'] = cuda_module
 except: pass
 try: import optimized_cuda_module; modules['opt_cuda'] = optimized_cuda_module
+except: pass
+try: import optimized2_cuda_module; modules['opt2_cuda'] = optimized2_cuda_module # <--- ADDED
 except: pass
 
 try:
@@ -406,6 +408,82 @@ class OptimizedCudaAdapter(ImplAdapter):
 
         return fn
 
+# -----------------------------------------------------------------------------
+# Adapter: optimized2_cuda_module (Fused CUDA V2) <--- ADDED
+# -----------------------------------------------------------------------------
+class Optimized2CudaAdapter(ImplAdapter):
+    name = "opt2_cuda_module (Fused V2)"
+    kind = "cuda"
+
+    def available(self) -> Tuple[bool, str]:
+        if optimized2_cuda_module is None:
+            return False, "optimized2_cuda_module import failed"
+        if not torch.cuda.is_available():
+            return False, "CUDA not available"
+        if not hasattr(optimized2_cuda_module, "wtconv_forward"):
+            return False, "opt2_cuda has no wtconv_forward"
+        return True, "ok"
+
+    def make_forward_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Callable[[], Any]:
+        pad = cfg.kernel_size // 2
+        stride = cfg.stride
+        x = inp.x_cuda
+        weights = inp.weights_cuda
+        groups = inp.groups
+
+        def fn():
+            out, _ = optimized2_cuda_module.wtconv_forward(
+                x, weights, stride, pad, groups, cfg.dwt_scale, cfg.idwt_scale, False
+            )
+            return out
+
+        return fn
+
+    def make_fwd_bwd_fn(self, cfg: BenchConfig, ref_layer: Any, inp: BenchInputs) -> Optional[Callable[[], Any]]:
+        if not hasattr(optimized2_cuda_module, "wtconv_backward"): return None
+
+        pad = cfg.kernel_size // 2
+        stride = cfg.stride
+        groups = inp.groups
+
+        x = inp.x_cuda.detach().clone().requires_grad_(True)
+        weights = [w.detach().clone().requires_grad_(True) for w in inp.weights_cuda]
+
+        class _Fn4(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x_, *w_list):
+                y, saved = optimized2_cuda_module.wtconv_forward(
+                    x_, list(w_list), int(stride), int(pad), int(groups), 
+                    float(cfg.dwt_scale), float(cfg.idwt_scale), True
+                )
+                ctx.saved = saved
+                ctx.w_list = w_list 
+                return y
+
+            @staticmethod
+            def backward(ctx, grad_out):
+                saved = ctx.saved
+                w_list = list(ctx.w_list)
+                gx, gw_list = optimized2_cuda_module.wtconv_backward(
+                    saved,
+                    grad_out.contiguous(),
+                    w_list,
+                    int(groups),
+                    float(cfg.dwt_scale),
+                    float(cfg.idwt_scale) 
+                )
+                return (gx, *gw_list)
+
+        def fn():
+            if x.grad is not None: x.grad.zero_()
+            for w in weights:
+                if w.grad is not None: w.grad.zero_()
+
+            y = _Fn4.apply(x, *weights)
+            y.mean().backward()
+            return None
+
+        return fn
 
 # -----------------------------------------------------------------------------
 # Registry
@@ -415,7 +493,8 @@ def default_registry() -> List[ImplAdapter]:
         WTConv2dAdapter(),
         #CppAdapter(),
         CudaTorchAdapter(),
-        OptimizedCudaAdapter(), # <--- ADDED
+        OptimizedCudaAdapter(),
+        Optimized2CudaAdapter(),
     ]
 
 

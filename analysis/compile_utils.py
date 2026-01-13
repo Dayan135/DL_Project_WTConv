@@ -72,8 +72,11 @@ def compile_all():
     # 2. Baseline CUDA
     run_setup(root / "cuda_source")
 
-    # 3. Optimized CUDA (New)
+    # 3. Optimized CUDA (Fused V1)
     run_setup(root / "optimized_cuda_source")
+
+    # 4. Optimized CUDA V2 (Fused Split) <--- ADDED
+    run_setup(root / "optimized2_cuda_source")
         
     print(f"[COMPILE] Finished in {time.time() - t0:.2f}s\n")
 
