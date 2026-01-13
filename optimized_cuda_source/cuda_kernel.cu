@@ -13,7 +13,9 @@
 
 #define TILE_DIM 16
 
-// [Keep fused_wtconv_fwd_kernel unchanged]
+// =================================================================================================
+// 1. FUSED FORWARD: DWT + Depthwise Conv (Unified Kernel)
+// =================================================================================================
 template <int K_VAL>
 __global__ void fused_wtconv_fwd_kernel(const float* __restrict__ input, const float* __restrict__ weight, 
                                         float* __restrict__ output, float* __restrict__ next_ll,
@@ -81,7 +83,9 @@ __global__ void fused_wtconv_fwd_kernel(const float* __restrict__ input, const f
     next_ll[n*(C*plane) + c*plane + h_out*(W/2) + w_out] = center_ll;
 }
 
-// [Keep fused_idwt_add_kernel unchanged]
+// =================================================================================================
+// 2. FUSED FORWARD: IDWT + Residual Add
+// =================================================================================================
 __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const float* __restrict__ deep_recon,
                                       float* __restrict__ output, int N, int C, int H, int W, float scale) {
     int w = blockIdx.x * blockDim.x + threadIdx.x;
@@ -114,7 +118,9 @@ __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const fl
     out[(2*h+1)*stride + 2*w+1] = x11;
 }
 
-// [Keep fused_dwt_split_kernel unchanged]
+// =================================================================================================
+// 3. BACKWARD: Split Gradients (DWT Split)
+// =================================================================================================
 __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon, 
                                        float* __restrict__ grad_conv_out,
                                        float* __restrict__ grad_prev_ll,
@@ -148,63 +154,12 @@ __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon,
     if(grad_prev_ll) grad_prev_ll[(n*C+c)*plane + idx] = ll;
 }
 
-// [Keep conv2d_dw_bwd_w_reduce_kernel unchanged]
-__inline__ __device__ float warpReduceSum(float val) {
-    for (int offset = 16; offset > 0; offset /= 2)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
-}
-
-__global__ void conv2d_dw_bwd_w_reduce_kernel(const float* __restrict__ grad_out, 
-                                              const float* __restrict__ input, 
-                                              float* __restrict__ grad_weight,
-                                              int N, int C, int H_out, int W_out, 
-                                              int K, int Stride, int Pad, int H_in, int W_in) {
-    int kw_idx = blockIdx.x; 
-    int c = blockIdx.y;      
-    int kh = kw_idx / K;
-    int kw = kw_idx % K;
-    
-    int out_plane = H_out * W_out;
-    int in_plane = H_in * W_in;
-    int total = N * out_plane;
-    float sum = 0.0f;
-
-    for (int i = threadIdx.x; i < total; i += blockDim.x) {
-        int idx_in_plane = i % out_plane;
-        int n = i / out_plane;
-        int h = idx_in_plane / W_out;
-        int w = idx_in_plane % W_out;
-        
-        int h_in = h * Stride - Pad + kh;
-        int w_in = w * Stride - Pad + kw;
-        
-        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-            // Note: grad_out is (N, C, H, W)
-            int go_idx = (n * C + c) * out_plane + h * W_out + w;
-            int in_idx = (n * C + c) * in_plane + h_in * W_in + w_in;
-            sum += grad_out[go_idx] * input[in_idx];
-        }
-    }
-    
-    sum = warpReduceSum(sum);
-    static __shared__ float shared[32];
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
-    if (lane == 0) shared[wid] = sum;
-    __syncthreads();
-    sum = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
-    if (wid == 0) sum = warpReduceSum(sum);
-    
-    if (threadIdx.x == 0) grad_weight[c * (K*K) + kw_idx] = sum;
-}
-
 // =================================================================================================
-// 5. UPDATED BACKWARD: Input (Unrolled Fused Conv+IDWT + Skip Connection)
+// 4. BACKWARD: Input Gradient (Fused Conv Bwd + IDWT)
 // =================================================================================================
 template <int K_VAL>
 __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_out, 
-                                           const float* __restrict__ grad_next_ll, // <--- ADDED Arg
+                                           const float* __restrict__ grad_next_ll, 
                                            const float* __restrict__ weight, 
                                            float* __restrict__ grad_input,
                                            int N, int C, int H, int W, float scale) {
@@ -248,7 +203,6 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
     float val_hl = 0.0f; float val_hh = 0.0f;
 
     if (w_out < W && h_out < H) {
-        // 1. Convolution Backward (Transpose)
         const float* w_base_c = weight + c * (4 * K_VAL * K_VAL);
         for (int kh = 0; kh < K_VAL; ++kh) {
             for (int kw = 0; kw < K_VAL; ++kw) {
@@ -266,7 +220,6 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
             }
         }
 
-        // 2. Add Gradient from Deeper Level (Skip Connection)
         if (grad_next_ll != nullptr) {
             val_ll += grad_next_ll[n * (C * plane_sz) + c * plane_sz + h_out * W + w_out];
         }
@@ -274,9 +227,6 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
 
     if (w_out >= W || h_out >= H) return;
 
-    // 3. Inverse DWT (Backward of DWT)
-    // Forward DWT: LL = (x00+...)*scale
-    // Backward DWT (gradient prop): d_x00 = (d_LL + d_LH + ...)*scale
     float x00 = (val_ll + val_lh + val_hl + val_hh) * scale;
     float x01 = (val_ll + val_lh - val_hl - val_hh) * scale;
     float x10 = (val_ll - val_lh + val_hl - val_hh) * scale;
@@ -292,6 +242,45 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
 }
 
 // =================================================================================================
+// 5. BACKWARD: Weight Gradient (OPTIMIZED FOR LOW LATENCY)
+// =================================================================================================
+// Replaces the complex reduction kernel. This "naive" serial loop is much faster
+// for small-to-medium batch sizes (N < 256) which is typical for this architecture.
+__global__ void conv2d_dw_bwd_w_naive_kernel(const float* __restrict__ grad_out, 
+                                             const float* __restrict__ input, 
+                                             float* __restrict__ grad_weight,
+                                             int N, int C, int H_out, int W_out, 
+                                             int K, int Stride, int Pad, int H_in, int W_in) {
+    int c = blockIdx.y;
+    int kw_idx = blockIdx.x * blockDim.x + threadIdx.x; // 0..K*K
+
+    if (c >= C || kw_idx >= K*K) return;
+
+    int kh = kw_idx / K;
+    int kw = kw_idx % K;
+
+    float sum = 0.0f;
+    
+    for(int n=0; n<N; ++n) {
+        const float* go_ptr = grad_out + (n*C+c)*(H_out*W_out);
+        const float* in_ptr = input + (n*C+c)*(H_in*W_in);
+        
+        for(int h=0; h<H_out; ++h) {
+            for(int w=0; w<W_out; ++w) {
+                int h_in = h*Stride - Pad + kh;
+                int w_in = w*Stride - Pad + kw;
+                
+                if(h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                    sum += go_ptr[h*W_out+w] * in_ptr[h_in*W_in + w_in];
+                }
+            }
+        }
+    }
+    
+    grad_weight[c*(K*K) + kw_idx] = sum;
+}
+
+// =================================================================================================
 // Launchers
 // =================================================================================================
 void launch_fused_wtconv_fwd(const float* input, const float* weight, float* output, float* next_ll, int N, int C, int H, int W, int K, float scale) {
@@ -302,17 +291,19 @@ void launch_fused_wtconv_fwd(const float* input, const float* weight, float* out
     else if(K==7) fused_wtconv_fwd_kernel<7><<<grid, block, smem>>>(input, weight, output, next_ll, N, C, H*2, W*2, scale);
     CUDA_CHECK(cudaGetLastError());
 }
+
 void launch_fused_idwt_add(const float* coeffs, const float* deep_recon, float* output, int N, int C, int H, int W, float scale) {
     dim3 block(32, 8); dim3 grid((W + 31)/32, (H + 7)/8, N * C);
     fused_idwt_add_kernel<<<grid, block>>>(coeffs, deep_recon, output, N, C, H, W, scale);
     CUDA_CHECK(cudaGetLastError());
 }
+
 void launch_fused_dwt_split(const float* grad_recon, float* grad_conv_out, float* grad_prev_ll, int N, int C, int H, int W, float scale) {
     dim3 block(32, 8); dim3 grid((W + 31)/32, (H + 7)/8, N * C);
     fused_dwt_split_kernel<<<grid, block>>>(grad_recon, grad_conv_out, grad_prev_ll, N, C, H, W, scale);
     CUDA_CHECK(cudaGetLastError());
 }
-// UPDATED LAUNCHER
+
 void launch_fused_conv_bwd_idwt(const float* grad_conv_out, const float* grad_next_ll, const float* weight, float* grad_input, int N, int C, int H, int W, int K, float scale) {
     dim3 block(TILE_DIM, TILE_DIM); dim3 grid((W + TILE_DIM - 1)/TILE_DIM, (H + TILE_DIM - 1)/TILE_DIM, N * C);
     int smem = 4 * (TILE_DIM+K-1)*(TILE_DIM+K-1) * sizeof(float);
@@ -321,8 +312,14 @@ void launch_fused_conv_bwd_idwt(const float* grad_conv_out, const float* grad_ne
     else if(K==7) fused_conv_bwd_idwt_kernel<7><<<grid, block, smem>>>(grad_conv_out, grad_next_ll, weight, grad_input, N, C, H, W, scale);
     CUDA_CHECK(cudaGetLastError());
 }
-void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight, int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
-    dim3 grid(K*K, C); dim3 block(256);
-    conv2d_dw_bwd_w_reduce_kernel<<<grid, block>>>(grad_out, input, grad_weight, N, C, H_out, W_out, K, Stride, Pad, H_in, W_in);
+
+void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight, 
+                                 int N, int C, int H_out, int W_out, 
+                                 int K, int Stride, int Pad, int H_in, int W_in) {
+    // UPDATED GRID: (1, C) blocks, (K*K) threads per block.
+    // Minimizes launch overhead compared to the previous reduction kernel.
+    dim3 block(K*K); 
+    dim3 grid(1, C); 
+    conv2d_dw_bwd_w_naive_kernel<<<grid, block>>>(grad_out, input, grad_weight, N, C, H_out, W_out, K, Stride, Pad, H_in, W_in);
     CUDA_CHECK(cudaGetLastError());
 }

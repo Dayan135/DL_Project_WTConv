@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, List, Tuple, Any
+import pandas as pd
 
 import numpy as np
 import torch
@@ -24,6 +25,7 @@ sys.path.append(ANALYSIS_DIR)
 import compile_utils
 
 # Check for --no-build flag *before* we do anything else
+# We prefer manual check here because we need to set the env var BEFORE imports might trigger compilation
 if "--no-build" in sys.argv:
     os.environ["SKIP_COMPILE"] = "1"
     print("[INFO] Compilation disabled via --no-build")
@@ -388,6 +390,8 @@ class OptimizedCudaAdapter(ImplAdapter):
                     grad_out.contiguous(),
                     w_list,
                     int(groups),
+                    float(cfg.dwt_scale),
+                    float(cfg.idwt_scale) 
                 )
                 return (gx, *gw_list)
 
@@ -472,29 +476,62 @@ def run_bench(
 
 
 def print_results(rows: List[ResultRow]) -> None:
-    print("\n=== Results ===")
+    data = []
     for r in rows:
         if not r.available:
-            print(f"- {r.name}: SKIP ({r.reason})")
             continue
+            
+        # Calculate derived Backward time
+        # (Total - Forward) is an approximation, but accurate enough for this context
+        bwd_ms = None
+        if r.fwd_bwd_ms is not None and r.forward_ms is not None:
+            bwd_ms = r.fwd_bwd_ms - r.forward_ms
 
-        fwd = "N/A" if r.forward_ms is None else f"{r.forward_ms:.4f} ms/iter"
-        bwd = "N/A" if r.fwd_bwd_ms is None else f"{r.fwd_bwd_ms:.4f} ms/iter"
-        print(f"- {r.name:24s} | forward: {fwd:16s} | fwd+bwd: {bwd:16s} | kind={r.kind}")
+        data.append({
+            "module": r.name,
+            "forward (ms/iter)": r.forward_ms,
+            "backward (ms/iter)": bwd_ms,
+            "fwd+bwd(ms/iter)": r.fwd_bwd_ms,
+            "ran on": r.kind
+        })
 
+    df = pd.DataFrame(data)
+
+    if df.empty:
+        print("No results to display.")
+        return
+
+    # Reorder columns to match your request exactly
+    cols = ["module", "forward (ms/iter)", "backward (ms/iter)", "fwd+bwd(ms/iter)", "ran on"]
+    df = df[cols]
+
+    print("\n=== Benchmark Results ===")
+    # round(4) keeps the precision readable
+    print(df.round(4).to_string(index=False))
 
 def main():
     import argparse
 
-    p = argparse.ArgumentParser()
-    p.add_argument("--iters", type=int, default=50)
-    p.add_argument("--warmup", type=int, default=30)
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--channels", type=int, default=64)
-    p.add_argument("--height", type=int, default=64)
-    p.add_argument("--width", type=int, default=64)
-    p.add_argument("--kernel", type=int, default=5)
-    p.add_argument("--levels", type=int, default=1)
+    p = argparse.ArgumentParser(description="WTConv Benchmark Framework")
+    
+    # Benchmark parameters
+    p.add_argument("--iters", type=int, default=50, help="Number of benchmark iterations")
+    p.add_argument("--warmup", type=int, default=30, help="Number of warmup iterations")
+    
+    # Input dimensions
+    p.add_argument("--batch", type=int, default=16, help="Batch size (N)")
+    p.add_argument("--channels", type=int, default=64, help="Input channels (C)")
+    p.add_argument("--height", type=int, default=64, help="Input height (H)")
+    p.add_argument("--width", type=int, default=64, help="Input width (W)")
+    
+    # Layer parameters
+    p.add_argument("--kernel", type=int, default=5, help="Kernel size (K)")
+    p.add_argument("--levels", type=int, default=1, help="Wavelet decomposition levels")
+    
+    # Compilation flags
+    # We add this so argparse doesn't error out, even though we check sys.argv manually at the top
+    p.add_argument("--no-build", action="store_true", help="Skip compilation of extensions")
+
     args = p.parse_args()
 
     cfg = BenchConfig(

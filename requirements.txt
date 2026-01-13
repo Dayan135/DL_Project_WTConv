@@ -4,6 +4,7 @@ pybind11
 setuptools
 pytest
 ninja
+pandas
 # Dependencies for the BGU Reference Repo
 PyWavelets
 timm
