@@ -13,9 +13,7 @@
 
 #define TILE_DIM 16
 
-// =================================================================================================
-// 1. FUSED FORWARD: DWT + Conv
-// =================================================================================================
+// [Keep fused_wtconv_fwd_kernel unchanged]
 template <int K_VAL>
 __global__ void fused_wtconv_fwd_kernel(const float* __restrict__ input, const float* __restrict__ weight, 
                                         float* __restrict__ output, float* __restrict__ next_ll,
@@ -83,9 +81,7 @@ __global__ void fused_wtconv_fwd_kernel(const float* __restrict__ input, const f
     next_ll[n*(C*plane) + c*plane + h_out*(W/2) + w_out] = center_ll;
 }
 
-// =================================================================================================
-// 2. FUSED UPWARD: IDWT + Add
-// =================================================================================================
+// [Keep fused_idwt_add_kernel unchanged]
 __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const float* __restrict__ deep_recon,
                                       float* __restrict__ output, int N, int C, int H, int W, float scale) {
     int w = blockIdx.x * blockDim.x + threadIdx.x;
@@ -118,9 +114,7 @@ __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const fl
     out[(2*h+1)*stride + 2*w+1] = x11;
 }
 
-// =================================================================================================
-// 3. BACKWARD: DWT Splitter
-// =================================================================================================
+// [Keep fused_dwt_split_kernel unchanged]
 __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon, 
                                        float* __restrict__ grad_conv_out,
                                        float* __restrict__ grad_prev_ll,
@@ -154,9 +148,7 @@ __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon,
     if(grad_prev_ll) grad_prev_ll[(n*C+c)*plane + idx] = ll;
 }
 
-// =================================================================================================
-// 4. BACKWARD: Weights (Fast Parallel Reduction)
-// =================================================================================================
+// [Keep conv2d_dw_bwd_w_reduce_kernel unchanged]
 __inline__ __device__ float warpReduceSum(float val) {
     for (int offset = 16; offset > 0; offset /= 2)
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -208,10 +200,11 @@ __global__ void conv2d_dw_bwd_w_reduce_kernel(const float* __restrict__ grad_out
 }
 
 // =================================================================================================
-// 5. BACKWARD: Input (Unrolled Fused Conv+IDWT)
+// 5. UPDATED BACKWARD: Input (Unrolled Fused Conv+IDWT + Skip Connection)
 // =================================================================================================
 template <int K_VAL>
 __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_out, 
+                                           const float* __restrict__ grad_next_ll, // <--- ADDED Arg
                                            const float* __restrict__ weight, 
                                            float* __restrict__ grad_input,
                                            int N, int C, int H, int W, float scale) {
@@ -255,6 +248,7 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
     float val_hl = 0.0f; float val_hh = 0.0f;
 
     if (w_out < W && h_out < H) {
+        // 1. Convolution Backward (Transpose)
         const float* w_base_c = weight + c * (4 * K_VAL * K_VAL);
         for (int kh = 0; kh < K_VAL; ++kh) {
             for (int kw = 0; kw < K_VAL; ++kw) {
@@ -271,10 +265,18 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
                 val_hh += px_hh * w_base_c[3 * k_sq + w_idx_flip];
             }
         }
+
+        // 2. Add Gradient from Deeper Level (Skip Connection)
+        if (grad_next_ll != nullptr) {
+            val_ll += grad_next_ll[n * (C * plane_sz) + c * plane_sz + h_out * W + w_out];
+        }
     }
 
     if (w_out >= W || h_out >= H) return;
 
+    // 3. Inverse DWT (Backward of DWT)
+    // Forward DWT: LL = (x00+...)*scale
+    // Backward DWT (gradient prop): d_x00 = (d_LL + d_LH + ...)*scale
     float x00 = (val_ll + val_lh + val_hl + val_hh) * scale;
     float x01 = (val_ll + val_lh - val_hl - val_hh) * scale;
     float x10 = (val_ll - val_lh + val_hl - val_hh) * scale;
@@ -310,12 +312,13 @@ void launch_fused_dwt_split(const float* grad_recon, float* grad_conv_out, float
     fused_dwt_split_kernel<<<grid, block>>>(grad_recon, grad_conv_out, grad_prev_ll, N, C, H, W, scale);
     CUDA_CHECK(cudaGetLastError());
 }
-void launch_fused_conv_bwd_idwt(const float* grad_conv_out, const float* weight, float* grad_input, int N, int C, int H, int W, int K, float scale) {
+// UPDATED LAUNCHER
+void launch_fused_conv_bwd_idwt(const float* grad_conv_out, const float* grad_next_ll, const float* weight, float* grad_input, int N, int C, int H, int W, int K, float scale) {
     dim3 block(TILE_DIM, TILE_DIM); dim3 grid((W + TILE_DIM - 1)/TILE_DIM, (H + TILE_DIM - 1)/TILE_DIM, N * C);
     int smem = 4 * (TILE_DIM+K-1)*(TILE_DIM+K-1) * sizeof(float);
-    if(K==5) fused_conv_bwd_idwt_kernel<5><<<grid, block, smem>>>(grad_conv_out, weight, grad_input, N, C, H, W, scale);
-    else if(K==3) fused_conv_bwd_idwt_kernel<3><<<grid, block, smem>>>(grad_conv_out, weight, grad_input, N, C, H, W, scale);
-    else if(K==7) fused_conv_bwd_idwt_kernel<7><<<grid, block, smem>>>(grad_conv_out, weight, grad_input, N, C, H, W, scale);
+    if(K==5) fused_conv_bwd_idwt_kernel<5><<<grid, block, smem>>>(grad_conv_out, grad_next_ll, weight, grad_input, N, C, H, W, scale);
+    else if(K==3) fused_conv_bwd_idwt_kernel<3><<<grid, block, smem>>>(grad_conv_out, grad_next_ll, weight, grad_input, N, C, H, W, scale);
+    else if(K==7) fused_conv_bwd_idwt_kernel<7><<<grid, block, smem>>>(grad_conv_out, grad_next_ll, weight, grad_input, N, C, H, W, scale);
     CUDA_CHECK(cudaGetLastError());
 }
 void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight, int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
