@@ -17,9 +17,19 @@ except ImportError:
     print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")    
 
 try:
-    from cuda_source.wtconv_cuda import WTConv2d_CUDA
+    from cuda_source.wtconv_cuda import WTConv2d_CUDA as cuda_WTConv2d
 except ImportError:
-    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")       
+    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")      
+
+try:
+    from optimized_cuda_source.wtconv_cuda_opt import WTConv2d_Fused as cuda_opt_WTConv2d
+except ImportError:
+    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")        
+
+try:
+    from optimized2_cuda_source.wtconv_cuda_opt import WTConv2d_Fused as cuda_opt2_WTConv2d
+except ImportError:
+    print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")    
 
 
 def replace_conv_with_wtconv(module, container_name='model', target_impl='reference', verbose=True):
@@ -68,7 +78,13 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
                     new_layer = WTConv2d_CPP(**config)
 
                 elif target_impl == 'cuda':
-                    new_layer = WTConv2d_CUDA(**config)    
+                    new_layer = cuda_WTConv2d(**config)
+
+                elif target_impl == 'cuda_opt':
+                    new_layer = cuda_opt_WTConv2d(**config)  
+
+                elif target_impl == 'cuda_opt2':
+                    new_layer = cuda_opt2_WTConv2d(**config)       
                 
                 else:
                     raise ValueError(f"Unknown impl: {target_impl}")
