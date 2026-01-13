@@ -2,6 +2,8 @@ torch
 numpy
 pybind11
 setuptools
+pytest
+ninja
 # Dependencies for the BGU Reference Repo
 PyWavelets
 timm
