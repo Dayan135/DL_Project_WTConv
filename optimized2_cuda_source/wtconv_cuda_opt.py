@@ -11,8 +11,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 try:
-    # Ensure this matches the name in your setup.py (e.g., 'cuda_fused_module')
-    import optimized2_cuda_module as cuda_module 
+    import optimized2_cuda_module as cuda_module
 except ImportError:
     cuda_module = None
     print("[WARN] cuda_module not found. Fused WTConv will fail.")
@@ -24,21 +23,25 @@ class WTConv2dFusedFunction(Function):
         """
         The input 'weights' is a variable argument list (one tensor per level).
         """
+
         if cuda_module is None:
             raise RuntimeError("C++ extension not loaded.")
 
         input = input.contiguous()
 
-        # 1. Call Fused Forward
+        # 1. Call Fused Forward using the super C++ module (forward logic copied into its CUDA)
         # Note: We pass training=True so C++ saves the inputs for backward
+        if cuda_module is None:
+            raise RuntimeError("C++ extension not loaded.")
+
         output, saved_inputs = cuda_module.wtconv_forward(
-            input, 
-            list(weights), 
-            stride, 
-            padding, 
-            groups, 
-            dwt_scale, 
-            idwt_scale, 
+            input,
+            list(weights),
+            stride,
+            padding,
+            groups,
+            dwt_scale,
+            idwt_scale,
             True  # training flag
         )
 
