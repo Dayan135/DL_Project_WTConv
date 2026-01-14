@@ -81,7 +81,7 @@ std::tuple<torch::Tensor, std::vector<torch::Tensor>> wtconv_forward(
         recon = fused_idwt_add_op(processed_highs[i], deep_recon, idwt_scale);
     }
 
-    return std::make_tuple(recon, saved_inputs);
+    gireturn std::make_tuple(recon, saved_inputs);
 }
 
 // Backward (Two-Pass)
