@@ -252,6 +252,7 @@ def main():
                 # 3. Store Results
                 result_entry = {
                     "implementation": impl,
+                    "wt_levels": wt_levels,
                     "checkpoint": filename,
                     "latency_ms": round(lat, 2),
                     "throughput_imgs_sec": round(thr, 2),

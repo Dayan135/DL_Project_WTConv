@@ -1,4 +1,3 @@
-
 import subprocess
 import time
 import sys
@@ -18,14 +17,14 @@ IMPLEMENTATIONS = [
 MODEL = "resnet18"
 EPOCHS = 3
 BATCH_SIZE = 64
-WT_LEVELS = 2
 DEVICE = "cuda"
-SEEDS = [42]  # <--- NEW: List of seeds for multiple runs
+SEEDS = [10, 2, 367]  # <--- NEW: List of seeds for multiple runs
+WT_LEVELS_LIST = [1,2,3, 4]
 
 # Paths (Relative to project root)
 TRAIN_SCRIPT = os.path.join("full_model_tests", "train.py")
 INFERENCE_SCRIPT = os.path.join("full_model_tests", "inference.py")
-ANALYSIS_SCRIPT = os.path.join("full_model_tests", "analyze_results.py" ) # <--- NEW: Path to analysis script
+ANALYSIS_SCRIPT = os.path.join("full_model_tests", "analyze_levels.py" ) # <--- NEW: Path to analysis script
 CACHE_DIR = "model_cache"
 
 def main():
@@ -33,7 +32,7 @@ def main():
     print(f"🚀 STARTING AUTOMATED SUITE (Train -> Inference -> Cleanup -> Analysis)")
     print(f"   Implementations: {IMPLEMENTATIONS}")
     print(f"   Seeds: {SEEDS}")
-    print(f"   Epochs: {EPOCHS} | Batch: {BATCH_SIZE} | Levels: {WT_LEVELS}")
+    print(f"   Epochs: {EPOCHS} | Batch: {BATCH_SIZE} | Levels: {WT_LEVELS_LIST}")
     print(f"==================================================\n")
 
     failed_runs = []
@@ -68,32 +67,31 @@ def main():
     #     print("    Waiting 3 seconds for GPU cooldown...")
     #     time.sleep(3)
     # --- PART 1: TRAINING LOOP (Nested) ---
+    # --- PART 1: TRAINING LOOP ---
     for seed in SEEDS:
-        print(f"\n🌱 === Starting Batch for SEED {seed} ===")
-        
-        for impl in IMPLEMENTATIONS:
-            print(f"   ▶️  [TRAIN] {impl} (Seed {seed})")
+        for level in WT_LEVELS_LIST:  # <--- NEW LOOP
+            for impl in IMPLEMENTATIONS:
+                print(f"\n▶️  [TRAIN] {impl} | Level {level} | Seed {seed}")
+                cmd = [
+                    sys.executable, TRAIN_SCRIPT,
+                    "--impl", impl,
+                    "--model", MODEL,
+                    "--epochs", str(EPOCHS),
+                    "--batch-size", str(BATCH_SIZE),
+                    "--wt-levels", str(level),
+                    "--device", DEVICE,
+                    "--save-weights",
+                    "--seed", str(seed)  # <--- Passing the seed
+                ]
 
-            cmd = [
-                sys.executable, TRAIN_SCRIPT,
-                "--impl", impl,
-                "--model", MODEL,
-                "--epochs", str(EPOCHS),
-                "--batch-size", str(BATCH_SIZE),
-                "--wt-levels", str(WT_LEVELS),
-                "--device", DEVICE,
-                "--save-weights",
-                "--seed", str(seed)  # <--- Passing the seed
-            ]
-
-            try:
-                subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError:
-                print(f"   ❌ Failed: {impl} (Seed {seed})")
-                # We continue to the next one even if this fails
-            
-            # Short cooldown
-            time.sleep(2)    
+                try:
+                    subprocess.run(cmd, check=True)
+                except subprocess.CalledProcessError:
+                    print(f"   ❌ Failed: {impl} (Seed {seed})")
+                    # We continue to the next one even if this fails
+                
+                # Short cooldown
+                time.sleep(1)    
 
     # --- PART 2: INFERENCE ---
     if len(failed_runs) == len(IMPLEMENTATIONS):
@@ -103,22 +101,6 @@ def main():
     print(f"\n==================================================")
     print(f"▶️  STARTING INFERENCE BENCHMARK")
     print(f"==================================================\n")
-
-    # inference_cmd = [
-    #     sys.executable, INFERENCE_SCRIPT,
-    #     "--model", MODEL,
-    #     "--batch-size", str(BATCH_SIZE),
-    #     "--device", DEVICE,
-    #     "--cache-dir", CACHE_DIR 
-    # ]
-
-    # try:
-    #     subprocess.run(inference_cmd, check=True)
-    #     print("\n✅  Inference Benchmark Completed.")
-    # except subprocess.CalledProcessError as e:
-    #     print(f"\n❌  Inference FAILED with exit code {e.returncode}.")
-    #     sys.exit(1)
-
 
     print(f"\n🔍 Starting Inference on ALL checkpoints...")
     subprocess.run([

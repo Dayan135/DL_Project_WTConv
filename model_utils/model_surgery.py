@@ -98,6 +98,6 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
 
         else:
             # Recursively go deeper
-            replace_conv_with_wtconv(child, f"{container_name}.{name}", target_impl, verbose)
+            replace_conv_with_wtconv(child, f"{container_name}.{name}", target_impl, verbose, num_of_levels=num_of_levels)
 
     return module

@@ -128,7 +128,7 @@ class WTConv2d_CUDA(nn.Module):
 
         x_padded = x
         if pad_h > 0 or pad_w > 0:
-            x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+            x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode="constant", value=0)
 
         # Ensure device matches
         if self.weight.is_cuda and not x_padded.is_cuda:
