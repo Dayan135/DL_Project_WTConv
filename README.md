@@ -4,8 +4,9 @@ This repository contains a highly optimized implementation of the **Wavelet Conv
 
 The project moves the computationally heavy operations from standard PyTorch layers to custom JIT-compiled extensions that utilize **Kernel Fusion**, **Shared Memory tiling**, and **Parallel Reduction**, achieving significant speedups over the reference implementation.
 
-Based on the articel: 
+Based on the article "Wavelet Convolutions for Large Receptive Fields" by Shahaf E. Finder, Roy Amoyal, Eran Treister, Oren Freifeld: 
 https://arxiv.org/abs/2407.05848
+
 And on BGU-CS-VIL/WTConv git repo as reference to speedup: 
 https://github.com/BGU-CS-VIL/WTConv
 
