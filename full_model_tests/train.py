@@ -1,3 +1,4 @@
+
 import argparse
 import time
 import sys
@@ -11,23 +12,27 @@ import torchvision.transforms as transforms
 from torchvision.models import resnet18, resnet50
 from datetime import datetime
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import your surgery tool
-from model_surgery import replace_conv_with_wtconv
+from model_utils.model_surgery import replace_conv_with_wtconv
 
 # --- 1. Argument Parsing ---
 def get_args():
     parser = argparse.ArgumentParser(description="WTConv Evaluation Suite")
     
     # Experiment Config
-    parser.add_argument('--impl', type=str, required=True, choices=['baseline', 'reference', 'cpp', 'cuda'],
+    parser.add_argument('--impl', type=str, required=True, choices=['baseline', 'reference', 'cpp', 'cuda', "cuda_opt", "cuda_opt2"],
                         help="Which implementation to test.")
     parser.add_argument('--model', type=str, default='resnet18', choices=['resnet18', 'resnet50'],
                         help="Model architecture to use.")
+    parser.add_argument('--wt-levels', type=int, default=2, help="Number of levels on each wtconv layer.")
     
     # Hyperparameters
     parser.add_argument('--batch-size', type=int, default=64, help="Input batch size.")
     parser.add_argument('--epochs', type=int, default=2, help="Number of training epochs.")
     parser.add_argument('--lr', type=float, default=0.001, help="Learning rate.")
+    parser.add_argument('--seed', type=int, default=1, help="Random seed for reproducibility.")
     
     # System Config
     parser.add_argument('--device', type=str, default='cuda', help="Device to run on.")
@@ -35,8 +40,12 @@ def get_args():
     parser.add_argument('--dry-run', action='store_true', help="Run only 10 batches to test.")
     
     # Output Config
-    parser.add_argument('--results-dir', type=str, default='./experiment_results', 
-                        help="Directory to store JSON results and checkpoints.")
+    parser.add_argument('--results-dir', type=str, default='./training_reports', 
+                        help="Directory to store JSON results.")
+    
+    # --- NEW: Cache Config ---
+    parser.add_argument('--cache-dir', type=str, default='./model_cache', 
+                        help="Directory to store model checkpoints.")
     parser.add_argument('--save-weights', action='store_true', help="Save model checkpoint.")
 
     return parser.parse_args()
@@ -50,9 +59,9 @@ def get_dataset(batch_size, num_workers):
         transforms.ToTensor(),
         transforms.Normalize(*stats)
     ])
-    
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Ensure data folder exists
-    root_dir = os.path.join(os.path.dirname(__file__), 'data')
+    root_dir = os.path.join(project_root, 'data')
     os.makedirs(root_dir, exist_ok=True)
 
     try:
@@ -69,8 +78,32 @@ def get_dataset(batch_size, num_workers):
     )
     return loader
 
+import random
+import numpy as np # Make sure you have numpy imported
+
+def set_seed(seed=42):
+    """Sets the seed for reproducibility."""
+    # 1. Python's built-in random
+    random.seed(seed)
+    
+    # 2. NumPy (used by many data loaders)
+    np.random.seed(seed)
+    
+    # 3. PyTorch (CPU & GPU)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+    
+    # 4. Ensure deterministic behavior (Optional but recommended for debugging)
+    # This makes operations slower but 100% reproducible. 
+    # For speed benchmarking, you might want to leave these commented out.
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False 
+    
+    print(f"🌱 Seed set to: {seed}")    
+
 # --- 3. Model Factory ---
-def get_model(arch, impl_type, device):
+def get_model(arch, impl_type, device,wt_levels):
     print(f"--- 🏗️  Building Model: {arch.upper()} [{impl_type}] ---")
     
     if arch == 'resnet18':
@@ -82,72 +115,13 @@ def get_model(arch, impl_type, device):
 
     if impl_type != 'baseline':
         print(f"    Performing surgery to inject '{impl_type}' layers...")
-        model = replace_conv_with_wtconv(model, target_impl=impl_type, verbose=True)
+        model = replace_conv_with_wtconv(model, target_impl=impl_type, verbose=True, num_of_levels=wt_levels)
     else:
         print("    Using standard nn.Conv2d layers.")
 
     return model.to(device)
 
-# # --- 4. Training Engine ---
-# def train_model(args, model, loader):
-#     criterion = nn.CrossEntropyLoss()
-#     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    
-#     inference_only = (args.impl == 'cpp')
-#     if inference_only:
-#         print("⚠️  WARNING: Running in INFERENCE ONLY mode (No Backprop).")
-
-#     start_event = torch.cuda.Event(enable_timing=True)
-#     end_event = torch.cuda.Event(enable_timing=True)
-    
-#     model.train()
-#     torch.cuda.reset_peak_memory_stats()
-    
-#     print(f"\n--- 🚀 Starting Training ({args.epochs} epochs) ---")
-    
-#     total_samples = 0
-#     total_compute_time = 0.0
-    
-#     for epoch in range(args.epochs):
-#         for i, (inputs, labels) in enumerate(loader):
-#             if args.dry_run and i >= 10: break
-
-#             inputs, labels = inputs.to(args.device), labels.to(args.device)
-            
-#             start_event.record()
-#             optimizer.zero_grad()
-#             outputs = model(inputs)
-#             loss = criterion(outputs, labels)
-            
-#             if not inference_only:
-#                 loss.backward()
-#                 optimizer.step()
-            
-#             end_event.record()
-#             torch.cuda.synchronize()
-            
-#             batch_ms = start_event.elapsed_time(end_event)
-#             total_compute_time += (batch_ms / 1000.0)
-#             total_samples += inputs.size(0)
-            
-#             if i % 20 == 0:
-#                 print(f"    Epoch [{epoch+1}/{args.epochs}] Step [{i}] Loss: {loss.item():.4f} | Batch Time: {batch_ms:.2f}ms")
-
-#     peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
-#     throughput = total_samples / total_compute_time if total_compute_time > 0 else 0
-    
-#     return {
-#         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-#         "implementation": args.impl,
-#         "model": args.model,
-#         "batch_size": args.batch_size,
-#         "epochs": args.epochs,
-#         "throughput_img_sec": round(throughput, 2),
-#         "peak_vram_mb": round(peak_mem, 2),
-#         "total_time_s": round(total_compute_time, 2),
-#         "device": args.device
-#         }
-
+# --- 4. Training Engine ---
 def train_model(args, model, loader):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -157,7 +131,6 @@ def train_model(args, model, loader):
         print("⚠️  WARNING: Running in INFERENCE ONLY mode (No Backprop).")
 
     # --- Setup Timing Events ---
-    # We need separate events for Forward and Backward to see where the bottleneck is
     start_batch = torch.cuda.Event(enable_timing=True)
     end_batch   = torch.cuda.Event(enable_timing=True)
     
@@ -176,10 +149,12 @@ def train_model(args, model, loader):
     total_batch_time = 0.0
     total_fwd_time = 0.0
     total_bwd_time = 0.0
+    valid_batches = 0
     
     # Track loss to ensure the model isn't outputting garbage (NaNs/Zeros)
     last_loss = 0.0 
-    
+    WARMUP_STEPS = 5
+
     for epoch in range(args.epochs):
         for i, (inputs, labels) in enumerate(loader):
             if args.dry_run and i >= 10: break
@@ -216,13 +191,14 @@ def train_model(args, model, loader):
             bwd_ms = 0.0
             if not inference_only:
                 bwd_ms = start_bwd.elapsed_time(end_bwd)
+            last_loss = loss.item()    
 
-            total_batch_time += (batch_ms / 1000.0) # convert to seconds
-            total_fwd_time   += (fwd_ms / 1000.0)
-            total_bwd_time   += (bwd_ms / 1000.0)
-            
-            total_samples += inputs.size(0)
-            last_loss = loss.item()
+            if i >= WARMUP_STEPS or epoch > 0:
+                total_batch_time += (batch_ms / 1000.0) # convert to seconds
+                total_fwd_time   += (fwd_ms / 1000.0)
+                total_bwd_time   += (bwd_ms / 1000.0)
+                total_samples += inputs.size(0)
+                valid_batches    += 1
             
             if i % 20 == 0:
                 print(f"    Epoch [{epoch+1}/{args.epochs}] Step [{i}] "
@@ -231,19 +207,25 @@ def train_model(args, model, loader):
 
     # --- Final Calculations ---
     peak_mem = torch.cuda.max_memory_allocated() / (1024 ** 2)
+
+    # Prevent division by zero if run was shorter than warmup
+    if valid_batches == 0:
+        valid_batches = 1
+
     throughput = total_samples / total_batch_time if total_batch_time > 0 else 0
     
     # Avoid division by zero if dry_run was too short
     num_batches = (i + 1) + (epoch * len(loader))
     if num_batches == 0: num_batches = 1
     
-    avg_fwd_ms = (total_fwd_time * 1000) / num_batches
-    avg_bwd_ms = (total_bwd_time * 1000) / num_batches
+    avg_fwd_ms = (total_fwd_time * 1000) / valid_batches
+    avg_bwd_ms = (total_bwd_time * 1000) / valid_batches
 
     return {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "implementation": args.impl,
         "model": args.model,
+        "wy_levels": args.wt_levels,
         "batch_size": args.batch_size,
         "epochs": args.epochs,
         "throughput_img_sec": round(throughput, 2),
@@ -258,25 +240,29 @@ def train_model(args, model, loader):
 # --- 5. Main Driver ---
 def main():
     args = get_args()
+
+  
     
     if args.device == 'cuda' and not torch.cuda.is_available():
         print("Error: CUDA requested but not available.")
         sys.exit(1)
 
+    set_seed(args.seed)
     # 1. Setup Directories
     os.makedirs(args.results_dir, exist_ok=True)
+    os.makedirs(args.cache_dir, exist_ok=True) # Ensure cache dir exists
     
-    # Generate Unique Run Name: e.g., "resnet18_baseline_b64_20231027_143005"
+    # Generate Unique Run Name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{args.model}_{args.impl}_b{args.batch_size}_{timestamp}"
+    run_name = f"{args.model}_{args.impl}_b{args.batch_size}_wtlevels_{args.wt_levels}_{timestamp}"
     
     loader = get_dataset(args.batch_size, args.num_workers)
-    model = get_model(args.model, args.impl, args.device)
+    model = get_model(args.model, args.impl, args.device,args.wt_levels)
     
     try:
         metrics = train_model(args, model, loader)
         
-        # 2. Save JSON Result
+        # 2. Save JSON Result (Original Location)
         json_path = os.path.join(args.results_dir, f"{run_name}.json")
         with open(json_path, 'w') as f:
             json.dump(metrics, f, indent=4)
@@ -285,9 +271,9 @@ def main():
         print(json.dumps(metrics, indent=4))
         print(f"📄 Result saved to: {json_path}")
             
-        # 3. Save Weights (if requested)
+        # 3. Save Weights (To CACHE Directory)
         if args.save_weights:
-            weights_path = os.path.join(args.results_dir, f"{run_name}.pth")
+            weights_path = os.path.join(args.cache_dir, f"{run_name}.pth")
             torch.save(model.state_dict(), weights_path)
             print(f"💾 Checkpoint saved: {weights_path}")
             

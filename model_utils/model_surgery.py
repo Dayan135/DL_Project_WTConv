@@ -32,7 +32,7 @@ except ImportError:
     print("[WARN] Could not import WTConv2d. Surgery will fail if requested.")    
 
 
-def replace_conv_with_wtconv(module, container_name='model', target_impl='reference', verbose=True):
+def replace_conv_with_wtconv(module, container_name='model', target_impl='reference', verbose=True , num_of_levels=3):
     """
     Recursively replaces nn.Conv2d with WTConv2d, BUT only if compatible.
     
@@ -64,7 +64,7 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
                 'kernel_size': child.kernel_size if isinstance(child.kernel_size, int) else child.kernel_size[0],
                 'stride': child.stride if isinstance(child.stride, int) else child.stride[0],
                 'bias': (child.bias is not None),
-                'wt_levels': 3, 
+                'wt_levels': num_of_levels, 
                 'wt_type': 'db1' 
             }
 
@@ -98,6 +98,6 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
 
         else:
             # Recursively go deeper
-            replace_conv_with_wtconv(child, f"{container_name}.{name}", target_impl, verbose)
+            replace_conv_with_wtconv(child, f"{container_name}.{name}", target_impl, verbose, num_of_levels=num_of_levels)
 
     return module

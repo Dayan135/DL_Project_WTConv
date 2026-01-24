@@ -9,13 +9,15 @@ import torchvision.transforms as transforms
 from torchvision.models import resnet18, resnet50
 from datetime import datetime
 import glob
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import your surgery tool
-from model_surgery import replace_conv_with_wtconv
+from model_utils.model_surgery import replace_conv_with_wtconv
 
 # --- Configuration ---
 # The implementations you want to search for in filenames
-IMPLS_TO_FIND = ["reference", "cuda_opt2", "cuda_opt", "cuda"] 
+IMPLS_TO_FIND = ["reference",  "cuda" ,"cuda_opt","cuda_opt2" ] 
+# IMPLS_TO_FIND = ["cuda_opt2"] 
 
 def get_args():
     parser = argparse.ArgumentParser(description="Final Comparative Benchmark")
@@ -30,6 +32,19 @@ def get_args():
                         help="New directory where results will be saved.")
     
     return parser.parse_args()
+
+def get_all_checkpoints(cache_dir, model_arch, impl):
+    """
+    Finds ALL .pth files matching the implementation.
+    
+    CRITICAL FIX: We add '_b' to the pattern.
+    This ensures 'cuda' doesn't match 'cuda_opt' (because 'opt' starts with 'o', not 'b').
+    """
+    # Pattern becomes: resnet18_cuda_b*.pth
+    search_pattern = os.path.join(cache_dir, f"{model_arch}_{impl}_b*.pth")
+    
+    files = glob.glob(search_pattern)
+    return sorted(files)
 
 def get_latest_checkpoint(cache_dir, model_arch, impl):
     """
@@ -54,7 +69,14 @@ def get_dataset(batch_size):
         transforms.ToTensor(),
         transforms.Normalize(*stats)
     ])
-    root = os.path.join(os.path.dirname(__file__), 'data')
+
+    
+    # root = os.path.join(os.path.dirname(__file__), 'data')
+    
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Ensure data folder exists
+    root = os.path.join(project_root, 'data')
+    os.makedirs(root, exist_ok=True)
     
     try:
         ds = torchvision.datasets.Imagenette(root=root, split='val', download=True, transform=transform)
@@ -63,14 +85,29 @@ def get_dataset(batch_size):
         
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-def get_model(arch, impl, device):
+
+import re  # <--- Add this import at the top
+
+def get_wt_levels_from_filename(filename):
+    """
+    Extracts the integer value after 'wtlevels_' in the filename.
+    Example: 'resnet18_cuda_opt2_b64_wtlevels_2_2025...' -> Returns 2
+    """
+    match = re.search(r"wtlevels_(\d+)", filename)
+    if match:
+        return int(match.group(1))
+    
+    print(f"⚠️  Warning: 'wtlevels' not found in {filename}. Defaulting to 2.")
+    return 2 # Default fallback    
+
+def get_model(arch, impl, device, wt_levels):
     if arch == 'resnet18':
         model = resnet18(num_classes=10)
     else:
         model = resnet50(num_classes=10)
         
     if impl != 'baseline':
-        model = replace_conv_with_wtconv(model, target_impl=impl, verbose=False)
+        model = replace_conv_with_wtconv(model, target_impl=impl, verbose=False,num_of_levels =wt_levels)
     
     return model.to(device)
 
@@ -145,44 +182,93 @@ def main():
     print(f"   Saving to:  {args.output_dir}")
     print(f"=======================================================================\n")
 
-    for impl in IMPLS_TO_FIND:
-        # Find file automatically
-        ckpt_path = get_latest_checkpoint(args.cache_dir, args.model, impl)
+    # for impl in IMPLS_TO_FIND:
+    #     # Find file automatically
+    #     ckpt_path = get_latest_checkpoint(args.cache_dir, args.model, impl)
         
-        if not ckpt_path:
-            print(f"⚠️  Skipping {impl}: No file found matching '{args.model}_{impl}*.pth'")
+    #     if not ckpt_path:
+    #         print(f"⚠️  Skipping {impl}: No file found matching '{args.model}_{impl}*.pth'")
+    #         continue
+            
+    #     filename = os.path.basename(ckpt_path)
+    #     print(f"Testing [{impl}] using {filename}...")
+    #     wt_levels = get_wt_levels_from_filename(filename)
+    #     print(f"   ⚙️  Detected WT Levels: {wt_levels}")
+        
+    #     try:
+    #         # 1. Build & Load
+    #         model = get_model(args.model, impl, args.device,wt_levels)
+    #         checkpoint = torch.load(ckpt_path, map_location=args.device)
+    #         model.load_state_dict(checkpoint, strict=False)
+            
+    #         # 2. Run Test
+    #         lat, thr, acc = run_benchmark(model, loader, args.device)
+            
+    #         # 3. Store Results
+    #         result_entry = {
+    #             "implementation": impl,
+    #             "checkpoint": filename,
+    #             "latency_ms": round(lat, 2),
+    #             "throughput_imgs_sec": round(thr, 2),
+    #             "accuracy_percent": round(acc, 2)
+    #         }
+    #         report_data.append(result_entry)
+            
+    #         print(f"   ✅ Done: {lat:.2f} ms | {acc:.2f}%")
+            
+    #         # Cleanup
+    #         del model
+    #         torch.cuda.empty_cache()
+
+            # except Exception as e:
+            # print(f"   ❌ Error: {e}")
+    for impl in IMPLS_TO_FIND:
+        # CHANGE: Get ALL files, not just the latest
+        ckpt_paths = get_all_checkpoints(args.cache_dir, args.model, impl)
+        
+        if not ckpt_paths:
+            print(f"⚠️  Skipping {impl}: No files found.")
             continue
             
-        filename = os.path.basename(ckpt_path)
-        print(f"Testing [{impl}] using {filename}...")
+        print(f"--- Found {len(ckpt_paths)} checkpoints for [{impl}] ---")
         
-        try:
-            # 1. Build & Load
-            model = get_model(args.model, impl, args.device)
-            checkpoint = torch.load(ckpt_path, map_location=args.device)
-            model.load_state_dict(checkpoint, strict=False)
+        for ckpt_path in ckpt_paths:
+            filename = os.path.basename(ckpt_path)
             
-            # 2. Run Test
-            lat, thr, acc = run_benchmark(model, loader, args.device)
+            # Extract wt_levels (reuse the helper function we made earlier)
+            wt_levels = get_wt_levels_from_filename(filename) 
             
-            # 3. Store Results
-            result_entry = {
-                "implementation": impl,
-                "checkpoint": filename,
-                "latency_ms": round(lat, 2),
-                "throughput_imgs_sec": round(thr, 2),
-                "accuracy_percent": round(acc, 2)
-            }
-            report_data.append(result_entry)
+            print(f"Testing {filename} (Levels={wt_levels})...")
             
-            print(f"   ✅ Done: {lat:.2f} ms | {acc:.2f}%")
+            try:
+                # 1. Build & Load
+                model = get_model(args.model, impl, args.device, wt_levels)
+                checkpoint = torch.load(ckpt_path, map_location=args.device)
+                model.load_state_dict(checkpoint, strict=False)
+                
+                # 2. Run Test
+                lat, thr, acc = run_benchmark(model, loader, args.device)
+                
+                # 3. Store Results
+                result_entry = {
+                    "implementation": impl,
+                    "wt_levels": wt_levels,
+                    "checkpoint": filename,
+                    "latency_ms": round(lat, 2),
+                    "throughput_imgs_sec": round(thr, 2),
+                    "accuracy_percent": round(acc, 2)
+                }
+                report_data.append(result_entry)
+                print(f"   ✅ Result: {lat:.2f} ms | {acc:.2f}%")
+                
+                # Cleanup
+                del model
+                torch.cuda.empty_cache()
+                
+            except Exception as e:
+                print(f"   ❌ Error processing {filename}: {e}")
             
-            # Cleanup
-            del model
-            torch.cuda.empty_cache()
-            
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
+
 
     # --- Generate Report Files ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
