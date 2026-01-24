@@ -1,10 +1,19 @@
-torch
+# Core DL & Math
+torch>=2.0.0
 numpy
+
+# Build System (Required for C++/CUDA Compiling)
 pybind11
 setuptools
-pytest
 ninja
+
+# Testing & Verification
+pytest
+
+# Benchmarking & Analysis
 pandas
-# Dependencies for the BGU Reference Repo
+matplotlib
+
+# Dependencies for Reference Implementation (BGU-CS-VIL/WTConv)
 PyWavelets
 timm
