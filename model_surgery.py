@@ -64,7 +64,7 @@ def replace_conv_with_wtconv(module, container_name='model', target_impl='refere
                 'kernel_size': child.kernel_size if isinstance(child.kernel_size, int) else child.kernel_size[0],
                 'stride': child.stride if isinstance(child.stride, int) else child.stride[0],
                 'bias': (child.bias is not None),
-                'wt_levels': 2, 
+                'wt_levels': 3, 
                 'wt_type': 'db1' 
             }
 

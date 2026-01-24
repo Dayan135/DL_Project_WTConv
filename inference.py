@@ -36,7 +36,7 @@ def get_latest_checkpoint(cache_dir, model_arch, impl):
     Finds the newest .pth file containing the implementation name.
     Example: matches 'resnet18_cuda_opt2_b64_...pth'
     """
-    search_pattern = os.path.join(cache_dir, f"{model_arch}_{impl}*.pth")
+    search_pattern = os.path.join(cache_dir, f"{model_arch}_{impl}_*.pth")
     files = glob.glob(search_pattern)
     
     if not files:
