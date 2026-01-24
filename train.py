@@ -517,7 +517,7 @@ def main():
     
     # Generate Unique Run Name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{args.model}_{args.impl}_b{args.batch_size}_{timestamp}"
+    run_name = f"{args.model}_{args.impl}b{args.batch_size}_{timestamp}"
     
     loader = get_dataset(args.batch_size, args.num_workers)
     model = get_model(args.model, args.impl, args.device)
