@@ -15,16 +15,17 @@ IMPLEMENTATIONS = [
 
 # Shared training settings
 MODEL = "resnet18"
-EPOCHS = 3
+EPOCHS = 6
 BATCH_SIZE = 64
 DEVICE = "cuda"
 SEEDS = [10, 2, 367]  # <--- NEW: List of seeds for multiple runs
-WT_LEVELS_LIST = [1,2,3, 4]
+WT_LEVELS_LIST = [1,2,3,4]
 
 # Paths (Relative to project root)
 TRAIN_SCRIPT = os.path.join("full_model_tests", "train.py")
 INFERENCE_SCRIPT = os.path.join("full_model_tests", "inference.py")
-ANALYSIS_SCRIPT = os.path.join("full_model_tests", "analyze_levels.py" ) # <--- NEW: Path to analysis script
+# ANALYSIS_SCRIPT = os.path.join("full_model_tests", "analyze_levels.py" ) # <--- NEW: Path to analysis script
+ANALYSIS_SCRIPT = "analyze_full_results.py" 
 CACHE_DIR = "model_cache"
 
 def main():
@@ -86,9 +87,9 @@ def main():
 
                 try:
                     subprocess.run(cmd, check=True)
-                except subprocess.CalledProcessError:
+                except subprocess.CalledProcessError as e:
                     print(f"   ❌ Failed: {impl} (Seed {seed})")
-                    # We continue to the next one even if this fails
+                    # 1. Print the Return Code (e.g., 1 or 255)
                 
                 # Short cooldown
                 time.sleep(1)    

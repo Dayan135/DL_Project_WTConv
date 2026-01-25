@@ -120,14 +120,14 @@ def run_benchmark(
     ref_fn = lambda: ref(x)
     results['PyTorch Ref'] = time_cuda(ref_fn, iters=iterations)
 
-    # 2. C++
-    if 'cpp' in modules:
-        print("Benchmarking C++ (CPU)...")
-        # Fewer iters for CPU
-        fn = make_fn(modules['cpp'], x, weights, stride, pad, groups, 0.5, 0.5, False)
-        # Dynamic CPU iters based on total iterations requested
-        cpu_iters = max(5, iterations // 5)
-        results['C++ (CPU)'] = time_cpu(fn, iters=cpu_iters)
+    # # 2. C++
+    # if 'cpp' in modules:
+    #     print("Benchmarking C++ (CPU)...")
+    #     # Fewer iters for CPU
+    #     fn = make_fn(modules['cpp'], x, weights, stride, pad, groups, 0.5, 0.5, False)
+    #     # Dynamic CPU iters based on total iterations requested
+    #     cpu_iters = max(5, iterations // 5)
+    #     results['C++ (CPU)'] = time_cpu(fn, iters=cpu_iters)
 
     # 3. Baseline CUDA
     if 'cuda' in modules:

@@ -175,8 +175,8 @@ def train_model(args, model, loader):
             if not inference_only:
                 start_bwd.record()
                 loss.backward()
-                optimizer.step()
                 end_bwd.record()
+                optimizer.step()
             
             end_batch.record()
             
