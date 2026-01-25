@@ -78,11 +78,11 @@ def get_dataset(batch_size):
     root = os.path.join(project_root, 'data')
     os.makedirs(root, exist_ok=True)
     
-    try:
-        ds = torchvision.datasets.Imagenette(root=root, split='val', download=True, transform=transform)
-    except:
-        ds = torchvision.datasets.Imagenette(root=root, split='train', download=False, transform=transform)
-        
+    # try:
+    #     ds = torchvision.datasets.Imagenette(root=root, split='val', download=True, transform=transform)
+    # except:
+    #     ds = torchvision.datasets.Imagenette(root=root, split='train', download=False, transform=transform)
+    ds = torchvision.datasets.Imagenette(root=root, split='val', download=True, transform=transform)    
     return torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
 
@@ -244,7 +244,7 @@ def main():
                 # 1. Build & Load
                 model = get_model(args.model, impl, args.device, wt_levels)
                 checkpoint = torch.load(ckpt_path, map_location=args.device)
-                model.load_state_dict(checkpoint, strict=False)
+                model.load_state_dict(checkpoint, strict=True)
                 
                 # 2. Run Test
                 lat, thr, acc = run_benchmark(model, loader, args.device)
