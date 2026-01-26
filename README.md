@@ -129,3 +129,62 @@ To analyze the performance improvements, run the benchmark script `analysis/benc
     | `--iters`   | 50      | Number of benchmark iterations for timing average               |
     | `--warmup`  | 30      | Number of warmup iterations before timing                       |
     | `--no-build`| False   | Skip auto-compilation step (useful if already compiled)         |
+
+
+## Reproducing Experiments
+We provide a fully automated experiment suite run_experiment_full.py that handles training, inference benchmarking, cleanup, and data analysis in a single step.
+
+- **Run the Full Suite (Paper Reproduction)**
+To replicate the exact experiments reported in our work (Training ResNet18 for 6 epochs on 3 different seeds, across all wavelet levels), run:
+   ```Bash
+    python run_experiment_full.py --epochs 6 --seeds 10 2 367 --levels 1 2 3 4
+    ```
+
+
+This script will automatically:
+
+   - Train the model using 4 different implementations (reference, cuda, cuda_opt, cuda_opt2) across all specified levels and seeds.
+     
+   - Benchmark Inference on the trained checkpoints to measure latency and throughput.
+     
+   - Clean Up heavy checkpoint files to save disk space (optional).
+     
+   - Analyze Results and generate the plots and tables found in `--full_analysis_output/`
+
+- **Custom Experiments:**
+   You can customize the benchmark using CLI flags.
+
+   - Example: Quick Sanity Check (1 Epoch, Level 1 only):
+       ```Bash
+          python run_experiment_full.py --epochs 1 --levels 1 --impls cuda_opt2
+       ```
+
+ | Flag               | Default  | Description                                                     |
+ |--------------------|----------|-----------------------------------------------------------------|
+ | `--epochs`         | 6        | Number of training epochs per run.                              |
+ | `--batch-size`     | 64       | Batch size for training and inference.                          |
+ | `--model`          | resnet18 | Model architecture to use (resnet18 or resnet50).               |
+ | `--seeds`          | 10 2 367 | Space-separated list of random seeds for multiple runs.         |
+ | `--levels`         | 1 2 3 4  | Space-separated list of Wavelet decomposition levels to test.   |
+ | `--impls`          | all      | Specific implementations to run (e.g. cuda_opt2).               |
+ | `--device`         | cuda     | Compute device (cuda or cpu).                                   |
+ | `--skip-train`     | False    | Skip the training phase (useful for re-running inference).      |
+ | `--skip-inference` | False    | Skip the inference benchmark phase.                             |
+ | `--no-cleanup`     | False    | Keep .pth checkpoints after the run (Uses disk space).          |
+ | `--no-report-clean`| False    | Do not delete old report folders before starting.               |
+
+
+- **Output Data**
+   - After the run completes, check the `--full_analysis_output/` directory for:
+   
+   - training_summary_by_level.csv: Detailed training metrics (Forward/Backward ms, VRAM).
+   
+   - inference_summary_by_level.csv: Inference latency and accuracy stats.
+   
+   - *.png: Visualizations including the Scalability Chart, Speedup Heatmap, and Kernel Breakdown.
+
+
+
+
+
+
