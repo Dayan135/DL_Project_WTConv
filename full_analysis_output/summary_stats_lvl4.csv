@@ -1,7 +1,0 @@
-,inf_latency,inf_latency,inf_throughput,inf_throughput,accuracy,accuracy
-,mean,std,mean,std,mean,std
-implementation,,,,,,
-cuda,22.59,0.14,2833.16,17.12,66.32,1.27
-cuda_opt,15.9,0.01,4025.97,0.5,67.42,1.6
-cuda_opt2,16.39,0.01,3903.84,1.7,68.14,0.39
-reference,40.07,0.64,1597.3,25.64,72.41,1.89

@@ -223,6 +223,27 @@ def generate_training_table(df):
     print(f"\n✅ Saved Training Table to: {csv_path}")    
 
 
+def generate_inference_table(df):
+    """Generates and saves a detailed Inference Performance Table (All Levels)."""
+    df_inf = df[df['type'] == 'inference']
+    if df_inf.empty: return
+
+    print("\n--- ⚡ Inference Performance Summary (All Levels) ---")
+    
+    # Aggregation: Group by Level & Implementation
+    summary = df_inf.groupby(['wt_levels', 'implementation']).agg({
+        'inf_latency': ['mean', 'std'],
+        'inf_throughput': ['mean', 'std'],
+        'accuracy': ['mean', 'std']
+    }).round(2)
+    
+    print(summary)
+    
+    csv_path = os.path.join(OUTPUT_DIR, "inference_summary_by_level.csv")
+    summary.to_csv(csv_path)
+    print(f"\n✅ Saved Inference Table to: {csv_path}")    
+
+
 # (Assuming 'df' is already loaded with your CSV data)
 
 def plot_advanced_analysis(df):
@@ -405,6 +426,7 @@ def main():
     plot_throughput_comparison(df)
     plot_kernel_breakdown_level4(df)
     generate_training_table(df)
+    generate_inference_table(df)
     plot_advanced_analysis(df)
     plot_inference_heatmap(df)
     
