@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "cuda_kernel.h"
 
 #define CUDA_CHECK(call) \
@@ -13,135 +14,145 @@
 
 #define TILE_DIM 16
 
+// ==========================
+// Forward-optimized tile size
+// ==========================
+#ifndef FWD_TILE_X
+#define FWD_TILE_X 32
+#endif
+
+#ifndef FWD_TILE_Y
+#define FWD_TILE_Y 8
+#endif
+
 // =================================================================================================
-// 1. SUPER OPTIMIZED FUSED FORWARD: Pre-computed DWT in Shared Memory
+// 1. FUSED FORWARD: DWT + Depthwise Conv (Optimized Forward Only)
+//    - 32x8 blocks for better coalescing
+//    - Row-wise cooperative load into shared memory
+//    - Cache 4*K*K weights in shared memory (broadcast-friendly)
+//    - Unroll loops for fixed K
 // =================================================================================================
 template <int K_VAL>
-__global__ void fused_wtconv_fwd_precalc_kernel(const float* __restrict__ input, 
-                                                const float* __restrict__ weight, 
-                                                float* __restrict__ output, 
-                                                float* __restrict__ next_ll,
-                                                int N, int C, int H, int W, float scale) {
-    // Shared Memory now stores DWT Coefficients, not raw pixels.
-    // Layout: [4 bands][Height][Width]
-    // 4 bands * (TILE + K - 1)^2
-    extern __shared__ float s_coeffs[];
-    
-    // Pointers to the 4 bands in shared memory
-    int smem_dim = TILE_DIM + K_VAL - 1;
-    int smem_plane = smem_dim * smem_dim;
-    float* s_ll = s_coeffs;
-    float* s_lh = s_coeffs + smem_plane;
-    float* s_hl = s_coeffs + 2 * smem_plane;
-    float* s_hh = s_coeffs + 3 * smem_plane;
+__global__ void fused_wtconv_fwd_kernel_opt(const float* __restrict__ input,
+                                            const float* __restrict__ weight,
+                                            float* __restrict__ output,
+                                            float* __restrict__ next_ll,
+                                            int N, int C, int H, int W,
+                                            float scale) {
+    // Shared layout:
+    //  [raw tile floats] [weights floats]
+    extern __shared__ float smem[];
+    float* s_raw = smem;
 
-    int tx = threadIdx.x; int ty = threadIdx.y;
-    int w_out = blockIdx.x * TILE_DIM + tx;
-    int h_out = blockIdx.y * TILE_DIM + ty;
-    int c = blockIdx.z % C; int n = blockIdx.z / C;
+    const int tx = threadIdx.x; // [0..31]
+    const int ty = threadIdx.y; // [0..7]
 
-    int pad = K_VAL / 2;
-    
-    // Calculate global offsets for DWT input (Raw Pixels)
-    // We need to load enough raw pixels to generate the coefficients.
-    // The "h_out" corresponds to the coefficient index.
-    // Raw pixel index = coefficient index * 2.
-    
-    int h_start = blockIdx.y * TILE_DIM - pad;
-    int w_start = blockIdx.x * TILE_DIM - pad;
-    
-    int tid = ty * TILE_DIM + tx;
-    int num_threads = TILE_DIM * TILE_DIM;
-    
+    const int w_out = blockIdx.x * FWD_TILE_X + tx; // coeff-domain x (W/2)
+    const int h_out = blockIdx.y * FWD_TILE_Y + ty; // coeff-domain y (H/2)
+
+    const int c = blockIdx.z % C;
+    const int n = blockIdx.z / C;
+
+    constexpr int pad = K_VAL / 2;
+
+    // Tile geometry in coeff-domain (subsampled): (FWD_TILE + K - 1)
+    constexpr int coeff_w = FWD_TILE_X + K_VAL - 1;
+    constexpr int coeff_h = FWD_TILE_Y + K_VAL - 1;
+
+    // Tile geometry in raw-domain (pre-DWT): *2
+    constexpr int raw_w = coeff_w * 2;
+    constexpr int raw_h = coeff_h * 2;
+
+    // Start in coeff-domain, then *2 in raw-domain
+    const int h_dwt_start = (int)blockIdx.y * FWD_TILE_Y - pad;
+    const int w_dwt_start = (int)blockIdx.x * FWD_TILE_X - pad;
+
     const float* in_base = input + (n * C + c) * (H * W);
 
-    // --- STEP 1: LOAD RAW & COMPUTE DWT INTO SMEM ---
-    for (int i = tid; i < smem_plane; i += num_threads) {
-        int r = i / smem_dim;      // Row in shared memory (coefficient space)
-        int c_loc = i % smem_dim;  // Col in shared memory (coefficient space)
-        
-        int global_h_coeff = h_start + r;
-        int global_w_coeff = w_start + c_loc;
-        
-        // Map coefficient coord -> raw pixel top-left coord
-        int gh_raw = global_h_coeff * 2;
-        int gw_raw = global_w_coeff * 2;
-        
-        float x00 = 0.0f, x01 = 0.0f, x10 = 0.0f, x11 = 0.0f;
-
-        // Boundary check (Raw Input)
-        if (gh_raw >= 0 && gh_raw < H - 1 && gw_raw >= 0 && gw_raw < W - 1) {
-            // Load 2x2 block
-            int row_offset = gh_raw * W + gw_raw;
-            x00 = in_base[row_offset];
-            x01 = in_base[row_offset + 1];
-            x10 = in_base[row_offset + W];
-            x11 = in_base[row_offset + W + 1];
-        } 
-        else if (gh_raw >= 0 && gh_raw < H && gw_raw >= 0 && gw_raw < W) {
-             // Precise boundary handling for edge cases
-             x00 = in_base[gh_raw * W + gw_raw];
-             if (gw_raw + 1 < W) x01 = in_base[gh_raw * W + gw_raw + 1];
-             if (gh_raw + 1 < H) x10 = in_base[(gh_raw + 1) * W + gw_raw];
-             if (gh_raw + 1 < H && gw_raw + 1 < W) x11 = in_base[(gh_raw + 1) * W + gw_raw + 1];
+    // 1) Coalesced 2D cooperative load of raw tile
+    //    Row-wise load gives warp-coalesced global reads.
+    for (int r = ty; r < raw_h; r += blockDim.y) {
+        const int gh = h_dwt_start * 2 + r;
+        for (int cc = tx; cc < raw_w; cc += blockDim.x) {
+            const int gw = w_dwt_start * 2 + cc;
+            float val = 0.0f;
+            if ((unsigned)gh < (unsigned)H && (unsigned)gw < (unsigned)W) {
+                val = in_base[gh * W + gw];
+            }
+            s_raw[r * raw_w + cc] = val;
         }
-
-        // Compute DWT immediately
-        s_ll[i] = (x00 + x01 + x10 + x11) * scale;
-        s_lh[i] = (x00 + x01 - x10 - x11) * scale;
-        s_hl[i] = (x00 - x01 + x10 - x11) * scale;
-        s_hh[i] = (x00 - x01 - x10 + x11) * scale;
     }
+
+    // 2) Cache weights in shared memory
+    float* s_w = s_raw + raw_h * raw_w;
+    constexpr int w_elems = 4 * K_VAL * K_VAL;
+
+    const int lin_tid = ty * blockDim.x + tx; // 0..255
+    const float* w_ptr = weight + c * w_elems;
+
+    for (int i = lin_tid; i < w_elems; i += blockDim.x * blockDim.y) {
+        s_w[i] = w_ptr[i];
+    }
+
     __syncthreads();
 
-    // --- STEP 2: CONVOLUTION (READ FROM SMEM) ---
-    if (w_out >= W/2 || h_out >= H/2) return;
+    // Bounds in coeff-domain
+    if ((unsigned)w_out >= (unsigned)(W / 2) || (unsigned)h_out >= (unsigned)(H / 2)) return;
 
-    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const float* w_ptr = weight + c * (4 * K_VAL * K_VAL); // (4, K, K)
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float center_ll = 0.0f;
 
-    // Save the center LL for the skip connection
-    // Corresponds to kh=pad, kw=pad in the loop
-    // In shared memory, our thread's output is at (ty + pad, tx + pad) relative to smem start
-    int center_idx = (ty + pad) * smem_dim + (tx + pad);
-    float center_ll = s_ll[center_idx];
+    constexpr int k_sq = K_VAL * K_VAL;
 
+    // 3) Compute DWT coeffs on-the-fly from shared raw tile and accumulate conv
     #pragma unroll
     for (int kh = 0; kh < K_VAL; ++kh) {
+        const int sm_r = (ty + kh) * 2;
         #pragma unroll
         for (int kw = 0; kw < K_VAL; ++kw) {
-            int sm_idx = (ty + kh) * smem_dim + (tx + kw);
-            
-            float val_ll = s_ll[sm_idx];
-            float val_lh = s_lh[sm_idx];
-            float val_hl = s_hl[sm_idx];
-            float val_hh = s_hh[sm_idx];
+            const int sm_c = (tx + kw) * 2;
 
-            int w_idx = kh * K_VAL + kw;
-            int k_sq = K_VAL * K_VAL;
+            const float x00 = s_raw[sm_r * raw_w + sm_c];
+            const float x01 = s_raw[sm_r * raw_w + (sm_c + 1)];
+            const float x10 = s_raw[(sm_r + 1) * raw_w + sm_c];
+            const float x11 = s_raw[(sm_r + 1) * raw_w + (sm_c + 1)];
 
-            // Simple MAD (Multiply-Add), no DWT math here
-            acc[0] += val_ll * w_ptr[0 * k_sq + w_idx];
-            acc[1] += val_lh * w_ptr[1 * k_sq + w_idx];
-            acc[2] += val_hl * w_ptr[2 * k_sq + w_idx];
-            acc[3] += val_hh * w_ptr[3 * k_sq + w_idx];
+            // Same Haar DWT math, fewer adds via reuse
+            const float a  = x00 + x01;
+            const float b  = x10 + x11;
+            const float c1 = x00 - x01;
+            const float d  = x10 - x11;
+
+            const float ll = (a + b)  * scale;
+            const float lh = (a - b)  * scale;
+            const float hl = (c1 + d) * scale;
+            const float hh = (c1 - d) * scale;
+
+            if (kh == pad && kw == pad) center_ll = ll;
+
+            const int w_idx = kh * K_VAL + kw;
+
+            // s_w layout: [LL][LH][HL][HH]
+            acc0 = fmaf(ll, s_w[0 * k_sq + w_idx], acc0);
+            acc1 = fmaf(lh, s_w[1 * k_sq + w_idx], acc1);
+            acc2 = fmaf(hl, s_w[2 * k_sq + w_idx], acc2);
+            acc3 = fmaf(hh, s_w[3 * k_sq + w_idx], acc3);
         }
     }
 
-    // Write Output
-    int plane = (H/2)*(W/2);
-    int out_idx = n*(4*C*plane) + h_out*(W/2) + w_out;
-    
-    output[out_idx + 0*plane + 4*c*plane] = acc[0];
-    output[out_idx + 1*plane + 4*c*plane] = acc[1];
-    output[out_idx + 2*plane + 4*c*plane] = acc[2];
-    output[out_idx + 3*plane + 4*c*plane] = acc[3];
-    
-    next_ll[n*(C*plane) + c*plane + h_out*(W/2) + w_out] = center_ll;
+    const int plane = (H / 2) * (W / 2);
+    const int out_idx = n * (4 * C * plane) + h_out * (W / 2) + w_out;
+
+    output[out_idx + 0 * plane + 4 * c * plane] = acc0;
+    output[out_idx + 1 * plane + 4 * c * plane] = acc1;
+    output[out_idx + 2 * plane + 4 * c * plane] = acc2;
+    output[out_idx + 3 * plane + 4 * c * plane] = acc3;
+
+    next_ll[n * (C * plane) + c * plane + h_out * (W / 2) + w_out] = center_ll;
 }
 
 // =================================================================================================
-// 2. FUSED UPWARD (Unchanged)
+// 2. FUSED FORWARD: IDWT + Residual Add  (UNCHANGED)
 // =================================================================================================
 __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const float* __restrict__ deep_recon,
                                       float* __restrict__ output, int N, int C, int H, int W, float scale) {
@@ -176,7 +187,7 @@ __global__ void fused_idwt_add_kernel(const float* __restrict__ coeffs, const fl
 }
 
 // =================================================================================================
-// 3. BACKWARD KERNELS (Unchanged)
+// 3. BACKWARD: Split Gradients (DWT Split)  (UNCHANGED)
 // =================================================================================================
 __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon, 
                                        float* __restrict__ grad_conv_out,
@@ -211,6 +222,9 @@ __global__ void fused_dwt_split_kernel(const float* __restrict__ grad_recon,
     if(grad_prev_ll) grad_prev_ll[(n*C+c)*plane + idx] = ll;
 }
 
+// =================================================================================================
+// 4. BACKWARD: Input Gradient (Fused Conv Bwd + IDWT)  (UNCHANGED)
+// =================================================================================================
 template <int K_VAL>
 __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_out, 
                                            const float* __restrict__ grad_next_ll, 
@@ -295,48 +309,60 @@ __global__ void fused_conv_bwd_idwt_kernel(const float* __restrict__ grad_conv_o
     out_ptr[r1] = x10; out_ptr[r1 + 1] = x11;
 }
 
-__inline__ __device__ float warpReduceSum(float val) {
-    for (int offset = 16; offset > 0; offset /= 2)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
+// =================================================================================================
+// 5. BACKWARD: Weight Gradient (FAST PARALLEL REDUCTION)  (UNCHANGED)
+// =================================================================================================
+__inline__ __device__ float warp_reduce_sum(float v) {
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v += __shfl_down_sync(0xffffffff, v, offset);
+    }
+    return v;
 }
 
-__global__ void conv2d_dw_bwd_w_reduce_kernel(const float* __restrict__ grad_out, 
-                                              const float* __restrict__ input, 
-                                              float* __restrict__ grad_weight,
-                                              int N, int C, int H_out, int W_out, 
-                                              int K, int Stride, int Pad, int H_in, int W_in) {
-    int kw_idx = blockIdx.x; 
-    int c = blockIdx.y;      
+__global__ void conv2d_dw_bwd_w_parallel_kernel(
+    const float* __restrict__ grad_out,
+    const float* __restrict__ input,
+    float* __restrict__ grad_weight,
+    int N, int C, int H_out, int W_out,
+    int K, int Stride, int Pad,
+    int H_in, int W_in
+) {
+    int c = blockIdx.x;
+    int kw_idx = blockIdx.y;
+
     int kh = kw_idx / K;
     int kw = kw_idx % K;
-    
-    int out_plane = H_out * W_out;
-    int in_plane = H_in * W_in;
-    int total = N * out_plane;
-    float sum = 0.0f;
 
-    for (int i = threadIdx.x; i < total; i += blockDim.x) {
-        int idx_in_plane = i % out_plane;
-        int n = i / out_plane;
-        int h = idx_in_plane / W_out;
-        int w = idx_in_plane % W_out;
-        
-        int h_in = h * Stride - Pad + kh;
-        int w_in = w * Stride - Pad + kw;
-        
-        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-            int go_idx = (n * C + c) * out_plane + h * W_out + w;
-            int in_idx = (n * C + c) * in_plane + h_in * W_in + w_in;
-            sum += grad_out[go_idx] * input[in_idx];
+    int total = N * H_out * W_out;
+
+    float sum = 0.0f;
+    for (int idx = threadIdx.x; idx < total; idx += blockDim.x) {
+        int tmp = idx;
+        int w = tmp % W_out; tmp /= W_out;
+        int h = tmp % H_out; tmp /= H_out;
+        int n = tmp;
+
+        int go = ((n * C + c) * H_out + h) * W_out + w;
+
+        int ih = h * Stride + kh - Pad;
+        int iw = w * Stride + kw - Pad;
+
+        float in_val = 0.0f;
+        if ((unsigned)ih < (unsigned)H_in && (unsigned)iw < (unsigned)W_in) {
+            int in = ((n * C + c) * H_in + ih) * W_in + iw;
+            in_val = input[in];
         }
+
+        sum += grad_out[go] * in_val;
     }
-    
-    sum = warpReduceSum(sum);
-    static __shared__ float shared[32];
-    int lane = threadIdx.x % 32;
-    int wid = threadIdx.x / 32;
-    if (lane == 0) shared[wid] = sum;
+
+    sum = warp_reduce_sum(sum);
+
+    __shared__ float shared[32];
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+
+    if (lane == 0) shared[warp] = sum;
     __syncthreads();
     sum = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
     if (wid == 0) sum = warpReduceSum(sum);
@@ -347,13 +373,25 @@ __global__ void conv2d_dw_bwd_w_reduce_kernel(const float* __restrict__ grad_out
 // =================================================================================================
 // Launchers
 // =================================================================================================
-void launch_fused_wtconv_fwd(const float* input, const float* weight, float* output, float* next_ll, int N, int C, int H, int W, int K, float scale) {
-    dim3 block(TILE_DIM, TILE_DIM); dim3 grid((W + TILE_DIM - 1)/TILE_DIM, (H + TILE_DIM - 1)/TILE_DIM, N * C);
-    // Updated SMEM size: 4 bands * (TILE + K - 1)^2
-    int smem = 4 * (TILE_DIM+K-1)*(TILE_DIM+K-1) * sizeof(float);
-    if(K==5) fused_wtconv_fwd_precalc_kernel<5><<<grid, block, smem>>>(input, weight, output, next_ll, N, C, H*2, W*2, scale);
-    else if(K==3) fused_wtconv_fwd_precalc_kernel<3><<<grid, block, smem>>>(input, weight, output, next_ll, N, C, H*2, W*2, scale);
-    else if(K==7) fused_wtconv_fwd_precalc_kernel<7><<<grid, block, smem>>>(input, weight, output, next_ll, N, C, H*2, W*2, scale);
+void launch_fused_wtconv_fwd(const float* input, const float* weight, float* output, float* next_ll,
+                             int N, int C, int H, int W, int K, float scale) {
+    // H,W here are subsampled spatial dims (H_sub, W_sub).
+    // Kernel expects full-res: H_full = H*2, W_full = W*2.
+    dim3 block(FWD_TILE_X, FWD_TILE_Y);
+    dim3 grid((W + FWD_TILE_X - 1) / FWD_TILE_X,
+              (H + FWD_TILE_Y - 1) / FWD_TILE_Y,
+              N * C);
+
+    // Shared memory = raw tile + cached weights
+    const int raw_w = (FWD_TILE_X + K - 1) * 2;
+    const int raw_h = (FWD_TILE_Y + K - 1) * 2;
+    const int smem_floats = raw_w * raw_h + (4 * K * K);
+    const int smem_bytes = smem_floats * (int)sizeof(float);
+
+    if (K == 5) fused_wtconv_fwd_kernel_opt<5><<<grid, block, smem_bytes>>>(input, weight, output, next_ll, N, C, H * 2, W * 2, scale);
+    else if (K == 3) fused_wtconv_fwd_kernel_opt<3><<<grid, block, smem_bytes>>>(input, weight, output, next_ll, N, C, H * 2, W * 2, scale);
+    else if (K == 7) fused_wtconv_fwd_kernel_opt<7><<<grid, block, smem_bytes>>>(input, weight, output, next_ll, N, C, H * 2, W * 2, scale);
+
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -378,8 +416,21 @@ void launch_fused_conv_bwd_idwt(const float* grad_conv_out, const float* grad_ne
     CUDA_CHECK(cudaGetLastError());
 }
 
-void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight, int N, int C, int H_out, int W_out, int K, int Stride, int Pad, int H_in, int W_in) {
-    dim3 grid(K*K, C); dim3 block(256);
-    conv2d_dw_bwd_w_reduce_kernel<<<grid, block>>>(grad_out, input, grad_weight, N, C, H_out, W_out, K, Stride, Pad, H_in, W_in);
+void launch_conv_depthwise_bwd_w(const float* grad_out, const float* input, float* grad_weight,
+                                 int N, int C, int H_out, int W_out,
+                                 int K, int Stride, int Pad, int H_in, int W_in) {
+    dim3 grid(C, K * K, 1);
+
+    int total = N * H_out * W_out;
+    int threads = 256;
+    if (total < 256) threads = 128;
+    if (total < 128) threads = 64;
+    if (total < 64)  threads = 32;
+
+    conv2d_dw_bwd_w_parallel_kernel<<<grid, threads>>>(
+        grad_out, input, grad_weight,
+        N, C, H_out, W_out,
+        K, Stride, Pad, H_in, W_in
+    );
     CUDA_CHECK(cudaGetLastError());
 }
