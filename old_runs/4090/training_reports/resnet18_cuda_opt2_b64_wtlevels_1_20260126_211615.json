@@ -1,0 +1,15 @@
+{
+    "timestamp": "2026-01-26 21:17:41",
+    "implementation": "cuda_opt2",
+    "model": "resnet18",
+    "wy_levels": 1,
+    "batch_size": 64,
+    "epochs": 6,
+    "throughput_img_sec": 2065.46,
+    "peak_vram_mb": 3668.96,
+    "total_time_s": 27.35,
+    "avg_fwd_ms": 5.69,
+    "avg_bwd_ms": 13.4,
+    "final_loss": 0.2489,
+    "device": "cuda"
+}

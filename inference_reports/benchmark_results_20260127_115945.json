@@ -1,0 +1,386 @@
+[
+    {
+        "implementation": "reference",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_reference_b64_wtlevels_1_20260127_104206.pth",
+        "latency_ms": 23.73,
+        "throughput_imgs_sec": 2697.52,
+        "accuracy_percent": 72.82
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_reference_b64_wtlevels_1_20260127_110428.pth",
+        "latency_ms": 26.46,
+        "throughput_imgs_sec": 2418.44,
+        "accuracy_percent": 74.09
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_reference_b64_wtlevels_1_20260127_112736.pth",
+        "latency_ms": 26.26,
+        "throughput_imgs_sec": 2437.19,
+        "accuracy_percent": 72.2
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_reference_b64_wtlevels_2_20260127_104730.pth",
+        "latency_ms": 45.96,
+        "throughput_imgs_sec": 1392.53,
+        "accuracy_percent": 71.85
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_reference_b64_wtlevels_2_20260127_110946.pth",
+        "latency_ms": 48.91,
+        "throughput_imgs_sec": 1308.43,
+        "accuracy_percent": 74.47
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_reference_b64_wtlevels_2_20260127_113237.pth",
+        "latency_ms": 43.31,
+        "throughput_imgs_sec": 1477.85,
+        "accuracy_percent": 73.96
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_reference_b64_wtlevels_3_20260127_105248.pth",
+        "latency_ms": 68.98,
+        "throughput_imgs_sec": 927.86,
+        "accuracy_percent": 72.66
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_reference_b64_wtlevels_3_20260127_111517.pth",
+        "latency_ms": 67.4,
+        "throughput_imgs_sec": 949.53,
+        "accuracy_percent": 66.29
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_reference_b64_wtlevels_3_20260127_113744.pth",
+        "latency_ms": 68.05,
+        "throughput_imgs_sec": 940.42,
+        "accuracy_percent": 74.27
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_reference_b64_wtlevels_4_20260127_105829.pth",
+        "latency_ms": 82.9,
+        "throughput_imgs_sec": 772.04,
+        "accuracy_percent": 70.27
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_reference_b64_wtlevels_4_20260127_112116.pth",
+        "latency_ms": 90.89,
+        "throughput_imgs_sec": 704.13,
+        "accuracy_percent": 72.56
+    },
+    {
+        "implementation": "reference",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_reference_b64_wtlevels_4_20260127_114314.pth",
+        "latency_ms": 88.96,
+        "throughput_imgs_sec": 719.39,
+        "accuracy_percent": 69.3
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_1_20260127_104329.pth",
+        "latency_ms": 6.27,
+        "throughput_imgs_sec": 10214.23,
+        "accuracy_percent": 67.9
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_1_20260127_110548.pth",
+        "latency_ms": 6.27,
+        "throughput_imgs_sec": 10209.18,
+        "accuracy_percent": 68.41
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_1_20260127_112851.pth",
+        "latency_ms": 6.24,
+        "throughput_imgs_sec": 10249.04,
+        "accuracy_percent": 73.83
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_2_20260127_104852.pth",
+        "latency_ms": 7.39,
+        "throughput_imgs_sec": 8659.44,
+        "accuracy_percent": 64.59
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_2_20260127_111111.pth",
+        "latency_ms": 7.32,
+        "throughput_imgs_sec": 8739.47,
+        "accuracy_percent": 71.26
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_2_20260127_113359.pth",
+        "latency_ms": 7.4,
+        "throughput_imgs_sec": 8651.35,
+        "accuracy_percent": 68.84
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_3_20260127_105428.pth",
+        "latency_ms": 8.48,
+        "throughput_imgs_sec": 7543.23,
+        "accuracy_percent": 66.29
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_3_20260127_111706.pth",
+        "latency_ms": 8.53,
+        "throughput_imgs_sec": 7504.75,
+        "accuracy_percent": 68.43
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_3_20260127_113925.pth",
+        "latency_ms": 8.51,
+        "throughput_imgs_sec": 7516.77,
+        "accuracy_percent": 69.83
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_4_20260127_110027.pth",
+        "latency_ms": 11.48,
+        "throughput_imgs_sec": 5576.46,
+        "accuracy_percent": 64.76
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_4_20260127_112330.pth",
+        "latency_ms": 11.54,
+        "throughput_imgs_sec": 5544.63,
+        "accuracy_percent": 62.01
+    },
+    {
+        "implementation": "cuda",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_b64_wtlevels_4_20260127_114511.pth",
+        "latency_ms": 11.54,
+        "throughput_imgs_sec": 5543.93,
+        "accuracy_percent": 66.29
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_1_20260127_104452.pth",
+        "latency_ms": 4.78,
+        "throughput_imgs_sec": 13395.73,
+        "accuracy_percent": 71.92
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_1_20260127_110707.pth",
+        "latency_ms": 4.82,
+        "throughput_imgs_sec": 13277.24,
+        "accuracy_percent": 74.7
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_1_20260127_113006.pth",
+        "latency_ms": 4.82,
+        "throughput_imgs_sec": 13286.59,
+        "accuracy_percent": 73.78
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_2_20260127_105009.pth",
+        "latency_ms": 5.67,
+        "throughput_imgs_sec": 11295.7,
+        "accuracy_percent": 70.04
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_2_20260127_111233.pth",
+        "latency_ms": 5.73,
+        "throughput_imgs_sec": 11165.91,
+        "accuracy_percent": 67.49
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_2_20260127_113515.pth",
+        "latency_ms": 5.67,
+        "throughput_imgs_sec": 11296.0,
+        "accuracy_percent": 72.41
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_3_20260127_105549.pth",
+        "latency_ms": 6.37,
+        "throughput_imgs_sec": 10051.96,
+        "accuracy_percent": 68.1
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_3_20260127_111831.pth",
+        "latency_ms": 6.34,
+        "throughput_imgs_sec": 10087.19,
+        "accuracy_percent": 69.78
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_3_20260127_114042.pth",
+        "latency_ms": 6.35,
+        "throughput_imgs_sec": 10077.24,
+        "accuracy_percent": 70.34
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_4_20260127_110151.pth",
+        "latency_ms": 8.35,
+        "throughput_imgs_sec": 7660.95,
+        "accuracy_percent": 66.62
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_4_20260127_112458.pth",
+        "latency_ms": 8.44,
+        "throughput_imgs_sec": 7586.62,
+        "accuracy_percent": 66.65
+    },
+    {
+        "implementation": "cuda_opt",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt_b64_wtlevels_4_20260127_114635.pth",
+        "latency_ms": 8.39,
+        "throughput_imgs_sec": 7632.09,
+        "accuracy_percent": 68.87
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_1_20260127_104614.pth",
+        "latency_ms": 4.91,
+        "throughput_imgs_sec": 13029.58,
+        "accuracy_percent": 73.43
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_1_20260127_110827.pth",
+        "latency_ms": 4.84,
+        "throughput_imgs_sec": 13210.0,
+        "accuracy_percent": 75.95
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 1,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_1_20260127_113122.pth",
+        "latency_ms": 4.87,
+        "throughput_imgs_sec": 13135.15,
+        "accuracy_percent": 75.52
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_2_20260127_105132.pth",
+        "latency_ms": 5.72,
+        "throughput_imgs_sec": 11196.24,
+        "accuracy_percent": 70.93
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_2_20260127_111356.pth",
+        "latency_ms": 5.75,
+        "throughput_imgs_sec": 11138.6,
+        "accuracy_percent": 75.26
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 2,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_2_20260127_113630.pth",
+        "latency_ms": 5.71,
+        "throughput_imgs_sec": 11208.46,
+        "accuracy_percent": 73.27
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_3_20260127_105712.pth",
+        "latency_ms": 6.45,
+        "throughput_imgs_sec": 9927.91,
+        "accuracy_percent": 71.11
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_3_20260127_111954.pth",
+        "latency_ms": 6.41,
+        "throughput_imgs_sec": 9984.21,
+        "accuracy_percent": 65.04
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 3,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_3_20260127_114159.pth",
+        "latency_ms": 6.43,
+        "throughput_imgs_sec": 9947.33,
+        "accuracy_percent": 72.03
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_4_20260127_110310.pth",
+        "latency_ms": 8.43,
+        "throughput_imgs_sec": 7588.1,
+        "accuracy_percent": 68.0
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_4_20260127_112621.pth",
+        "latency_ms": 8.47,
+        "throughput_imgs_sec": 7558.88,
+        "accuracy_percent": 66.9
+    },
+    {
+        "implementation": "cuda_opt2",
+        "wt_levels": 4,
+        "checkpoint": "resnet18_cuda_opt2_b64_wtlevels_4_20260127_114753.pth",
+        "latency_ms": 8.46,
+        "throughput_imgs_sec": 7562.27,
+        "accuracy_percent": 67.41
+    }
+]
